@@ -40,12 +40,14 @@ DB = os.environ.get("DB_PATH", "/data/db.sqlite")
 UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "/data/uploads")
 MAGISK_TEMPLATE_DIR = Path(os.environ.get("MAGISK_TEMPLATE_DIR", "/app/magisk-template"))
 WINDOWS_TEMPLATE_DIR = Path(os.environ.get("WINDOWS_TEMPLATE_DIR", "/app/windows-client"))
-MAGISK_VERSION = "1.2.0"
-WINDOWS_VERSION = "1.2.0"
+MAGISK_VERSION = "1.3.0"
+WINDOWS_VERSION = "1.3.0"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 _rate_lock = threading.Lock()
 _rate_events = {}
+_socket_lock = threading.Lock()
+_socket_devices = {}
 
 def rate_limited(bucket, key, maximum, window_seconds):
     now = time.monotonic()
@@ -74,6 +76,13 @@ def csrf_token():
     return value
 
 app.jinja_env.globals["csrf_token"] = csrf_token
+
+def format_timestamp(value):
+    if not value:
+        return "从未"
+    return datetime.datetime.fromtimestamp(int(value)).strftime("%Y-%m-%d %H:%M:%S")
+
+app.jinja_env.globals["format_timestamp"] = format_timestamp
 
 @app.before_request
 def enforce_csrf():
@@ -191,15 +200,38 @@ def get_db():
     finally:
         conn.close()
 
-def find_device_by_token(token):
+def find_device_by_token(token, touch=True):
     if not token:
         return None
     with get_db() as conn:
-        return conn.execute("""
-            SELECT d.id, d.user_id, d.name, u.username
+        device = conn.execute("""
+            SELECT d.id, d.user_id, d.name, d.sync_mode, d.platform,
+                   d.client_version, u.username
             FROM devices d JOIN users u ON d.user_id = u.id
-            WHERE d.token_hash=?
+            WHERE d.token_hash=? AND COALESCE(u.disabled, 0)=0
         """, (token_digest(token),)).fetchone()
+        if device and touch:
+            client_version = request.headers.get("X-Client-Version", "").strip()[:40]
+            if client_version:
+                conn.execute(
+                    "UPDATE devices SET last_seen_at=?, client_version=? WHERE id=?",
+                    (int(time.time()), client_version, device['id']),
+                )
+            else:
+                conn.execute(
+                    "UPDATE devices SET last_seen_at=? WHERE id=?",
+                    (int(time.time()), device['id']),
+                )
+            conn.commit()
+        return device
+
+def mark_device_synced(device_id):
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE devices SET last_seen_at=?, last_sync_at=? WHERE id=?",
+            (int(time.time()), int(time.time()), device_id),
+        )
+        conn.commit()
 
 def password_matches(stored, supplied):
     if not stored:
@@ -213,17 +245,31 @@ def socket_connect(auth):
     token = (auth or {}).get('token', '') if isinstance(auth, dict) else ''
     device = find_device_by_token(token)
     if device:
-        join_room(f"user_{device['user_id']}")
+        with _socket_lock:
+            _socket_devices[request.sid] = device['id']
+        join_room(f"device_{device['id']}")
         return True
     return False
+
+@socketio.on('disconnect')
+def socket_disconnect():
+    with _socket_lock:
+        device_id = _socket_devices.pop(request.sid, None)
+    if device_id:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE devices SET last_seen_at=? WHERE id=?",
+                (int(time.time()), device_id),
+            )
+            conn.commit()
 
 def init_db():
     with get_db() as conn:
         c = conn.cursor()
-        c.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, question TEXT, answer TEXT, is_admin INTEGER DEFAULT 0)')
-        c.execute('CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, device TEXT, content TEXT, created_at TEXT, is_favorite INTEGER DEFAULT 0)')
-        c.execute('CREATE TABLE IF NOT EXISTS codes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, device TEXT, content TEXT, pure_code TEXT, created_at TEXT, is_favorite INTEGER DEFAULT 0)')
-        c.execute("CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, token TEXT, token_hash TEXT UNIQUE, platform TEXT DEFAULT 'generic')")
+        c.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, question TEXT, answer TEXT, is_admin INTEGER DEFAULT 0, disabled INTEGER DEFAULT 0, last_login_at INTEGER)')
+        c.execute('CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, device TEXT, content TEXT, created_at TEXT, created_ts INTEGER, is_favorite INTEGER DEFAULT 0)')
+        c.execute('CREATE TABLE IF NOT EXISTS codes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, device TEXT, content TEXT, pure_code TEXT, created_at TEXT, created_ts INTEGER, is_favorite INTEGER DEFAULT 0)')
+        c.execute("CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, token TEXT, token_hash TEXT UNIQUE, platform TEXT DEFAULT 'generic', sync_mode TEXT DEFAULT 'both', last_seen_at INTEGER, last_sync_at INTEGER, client_version TEXT)")
         c.execute('''CREATE TABLE IF NOT EXISTS sync_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -231,7 +277,9 @@ def init_db():
             item_type TEXT NOT NULL,
             content TEXT NOT NULL,
             pure_code TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            created_ts INTEGER,
+            event_id TEXT
         )''')
         c.execute('CREATE INDEX IF NOT EXISTS idx_sync_events_user_id_id ON sync_events(user_id, id)')
         c.execute('''CREATE TABLE IF NOT EXISTS files (
@@ -240,7 +288,8 @@ def init_db():
             filename TEXT,
             original_name TEXT,
             file_size INTEGER,
-            created_at TEXT
+            created_at TEXT,
+            created_ts INTEGER
         )''')
         c.execute('''CREATE TABLE IF NOT EXISTS invites (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,6 +321,23 @@ def init_db():
         try:
             c.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
         except: pass
+        for statement in [
+            "ALTER TABLE users ADD COLUMN disabled INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_login_at INTEGER",
+            "ALTER TABLE devices ADD COLUMN sync_mode TEXT DEFAULT 'both'",
+            "ALTER TABLE devices ADD COLUMN last_seen_at INTEGER",
+            "ALTER TABLE devices ADD COLUMN last_sync_at INTEGER",
+            "ALTER TABLE devices ADD COLUMN client_version TEXT",
+            "ALTER TABLE clips ADD COLUMN created_ts INTEGER",
+            "ALTER TABLE codes ADD COLUMN created_ts INTEGER",
+            "ALTER TABLE files ADD COLUMN created_ts INTEGER",
+            "ALTER TABLE sync_events ADD COLUMN created_ts INTEGER",
+            "ALTER TABLE sync_events ADD COLUMN event_id TEXT",
+        ]:
+            try:
+                c.execute(statement)
+            except sqlite3.OperationalError:
+                pass
         if c.execute("SELECT 1 FROM users LIMIT 1").fetchone() and not c.execute("SELECT 1 FROM users WHERE is_admin=1 LIMIT 1").fetchone():
             c.execute("UPDATE users SET is_admin=1 WHERE id=(SELECT MIN(id) FROM users)")
         for row in c.execute("SELECT id, password FROM users").fetchall():
@@ -289,7 +355,28 @@ def init_db():
                     "UPDATE devices SET token_hash=?, token=NULL WHERE id=?",
                     (digest, row[0]),
                 )
+        c.execute("UPDATE devices SET sync_mode='both' WHERE sync_mode NOT IN ('both','send_only','receive_only','paused') OR sync_mode IS NULL")
+        current_year = datetime.datetime.now().year
+        current_time = int(time.time())
+        for table in ('clips', 'codes', 'files', 'sync_events'):
+            for row in c.execute(
+                f"SELECT id, created_at FROM {table} WHERE created_ts IS NULL"
+            ).fetchall():
+                timestamp = current_time
+                try:
+                    parsed = datetime.datetime.strptime(
+                        f"{current_year}-{row[1]}", "%Y-%m-%d %H:%M:%S"
+                    )
+                    if parsed.timestamp() > current_time + 86400:
+                        parsed = parsed.replace(year=current_year - 1)
+                    timestamp = int(parsed.timestamp())
+                except (TypeError, ValueError):
+                    pass
+                c.execute(f"UPDATE {table} SET created_ts=? WHERE id=?", (timestamp, row[0]))
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_token_hash ON devices(token_hash)")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_events_device_event ON sync_events(source_device_id,event_id) WHERE event_id IS NOT NULL")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_clips_user_created ON clips(user_id,created_ts DESC,id DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_codes_user_created ON codes(user_id,created_ts DESC,id DESC)")
         conn.commit()
 
 init_db()
@@ -298,6 +385,14 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session: return redirect(url_for('login'))
+        with get_db() as conn:
+            user = conn.execute(
+                "SELECT disabled FROM users WHERE id=?",
+                (session['user_id'],),
+            ).fetchone()
+        if not user or user['disabled']:
+            session.clear()
+            return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -370,13 +465,18 @@ def login():
             abort(429)
         with get_db() as conn:
             user = conn.execute("SELECT * FROM users WHERE username=?", (request.form['username'],)).fetchone()
-            if user and password_matches(user['password'], request.form['password']):
+            if user and not user['disabled'] and password_matches(user['password'], request.form['password']):
                 if not user['password'].startswith(("scrypt:", "pbkdf2:")):
                     conn.execute(
                         "UPDATE users SET password=? WHERE id=?",
                         (generate_password_hash(request.form['password']), user['id']),
                     )
                     conn.commit()
+                conn.execute(
+                    "UPDATE users SET last_login_at=? WHERE id=?",
+                    (int(time.time()), user['id']),
+                )
+                conn.commit()
                 session.clear()
                 session['user_id'], session['username'] = user['id'], user['username']
                 session['is_admin'] = bool(user['is_admin'])
@@ -498,6 +598,84 @@ def accept_invite(raw_token):
                 flash("用户名已存在")
     return render_template('invite.html')
 
+@app.route('/account', methods=['GET', 'POST'])
+@login_required
+def account():
+    if request.method == 'POST':
+        current_password = request.form.get('current_password', '')
+        new_password = request.form.get('new_password', '')
+        confirmation = request.form.get('confirm_password', '')
+        with get_db() as conn:
+            user = conn.execute(
+                "SELECT password FROM users WHERE id=?",
+                (session['user_id'],),
+            ).fetchone()
+            if not user or not password_matches(user['password'], current_password):
+                flash("当前密码不正确")
+            elif len(new_password) < 10:
+                flash("新密码至少需要 10 个字符")
+            elif new_password != confirmation:
+                flash("两次输入的新密码不一致")
+            else:
+                conn.execute(
+                    "UPDATE users SET password=? WHERE id=?",
+                    (generate_password_hash(new_password), session['user_id']),
+                )
+                conn.commit()
+                flash("密码修改成功")
+                return redirect('/account')
+    return render_template('account.html')
+
+@app.route('/admin/users')
+@admin_required
+def admin_users():
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT u.id,u.username,u.is_admin,u.disabled,u.last_login_at,
+                   COUNT(DISTINCT d.id) AS device_count,
+                   COUNT(DISTINCT c.id) AS clip_count
+            FROM users u
+            LEFT JOIN devices d ON d.user_id=u.id
+            LEFT JOIN clips c ON c.user_id=u.id
+            GROUP BY u.id
+            ORDER BY u.id
+        """).fetchall()
+    return render_template('users.html', rows=rows)
+
+@app.route('/admin/users/<int:user_id>/action', methods=['POST'])
+@admin_required
+def admin_user_action(user_id):
+    action = request.form.get('action', '')
+    with get_db() as conn:
+        target = conn.execute(
+            "SELECT id,username,is_admin,disabled FROM users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+        if not target:
+            abort(404)
+        if action == 'toggle_disabled':
+            if target['id'] == session['user_id'] or target['is_admin']:
+                flash("不能停用当前管理员账号")
+            else:
+                disabled = 0 if target['disabled'] else 1
+                conn.execute("UPDATE users SET disabled=? WHERE id=?", (disabled, user_id))
+                conn.commit()
+                flash("账号已停用" if disabled else "账号已启用")
+        elif action == 'reset_password':
+            new_password = request.form.get('new_password', '')
+            if len(new_password) < 10:
+                flash("临时密码至少需要 10 个字符")
+            else:
+                conn.execute(
+                    "UPDATE users SET password=? WHERE id=?",
+                    (generate_password_hash(new_password), user_id),
+                )
+                conn.commit()
+                flash(f"已重置 {target['username']} 的密码")
+        else:
+            abort(400)
+    return redirect('/admin/users')
+
 @app.route('/logout', methods=['POST'])
 def logout(): session.clear(); return redirect('/login')
 
@@ -505,27 +683,99 @@ def logout(): session.clear(); return redirect('/login')
 @login_required
 def index(): return render_template("index.html")
 
+def history_page(table, endpoint, include_pure_code=False):
+    query = request.args.get('q', '').strip()[:200]
+    device = request.args.get('device', '').strip()[:80]
+    date_from = request.args.get('date_from', '').strip()
+    date_to = request.args.get('date_to', '').strip()
+    try:
+        page = max(1, int(request.args.get('page', '1')))
+    except ValueError:
+        page = 1
+    try:
+        requested_size = int(request.args.get('per_page', '50'))
+    except ValueError:
+        requested_size = 50
+    per_page = requested_size if requested_size in {20, 50, 100} else 50
+
+    clauses = ["user_id=?"]
+    params = [session['user_id']]
+    if query:
+        escaped = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        pattern = f"%{escaped}%"
+        search_columns = ["content", "device"]
+        if include_pure_code:
+            search_columns.append("pure_code")
+        clauses.append("(" + " OR ".join(f"{column} LIKE ? ESCAPE '\\'" for column in search_columns) + ")")
+        params.extend([pattern] * len(search_columns))
+    if device:
+        clauses.append("device=?")
+        params.append(device)
+
+    def parse_date(value, next_day=False):
+        if not value:
+            return None
+        try:
+            parsed = datetime.datetime.strptime(value, "%Y-%m-%d")
+            if next_day:
+                parsed += datetime.timedelta(days=1)
+            return int(parsed.timestamp())
+        except ValueError:
+            return None
+
+    start_ts = parse_date(date_from)
+    end_ts = parse_date(date_to, next_day=True)
+    if start_ts is not None:
+        clauses.append("created_ts>=?")
+        params.append(start_ts)
+    if end_ts is not None:
+        clauses.append("created_ts<?")
+        params.append(end_ts)
+    where = " AND ".join(clauses)
+
+    with get_db() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE {where}", params
+        ).fetchone()[0]
+        pages = max(1, (total + per_page - 1) // per_page)
+        page = min(page, pages)
+        rows = conn.execute(
+            f"SELECT * FROM {table} WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params + [per_page, (page - 1) * per_page],
+        ).fetchall()
+        device_options = [row[0] for row in conn.execute(
+            f"SELECT DISTINCT device FROM {table} WHERE user_id=? AND device IS NOT NULL AND device<>'' ORDER BY device",
+            (session['user_id'],),
+        ).fetchall()]
+
+    def page_url(number):
+        values = {
+            'q': query, 'device': device, 'date_from': date_from,
+            'date_to': date_to, 'per_page': per_page, 'page': number,
+        }
+        return url_for(endpoint, **{key: value for key, value in values.items() if value not in {'', None}})
+
+    first = max(1, page - 2)
+    last = min(pages, page + 2)
+    pagination = {
+        'page': page, 'pages': pages, 'total': total, 'per_page': per_page,
+        'prev_url': page_url(page - 1) if page > 1 else None,
+        'next_url': page_url(page + 1) if page < pages else None,
+        'links': [(number, page_url(number)) for number in range(first, last + 1)],
+    }
+    filters = {
+        'q': query, 'device': device, 'date_from': date_from, 'date_to': date_to,
+    }
+    return rows, device_options, filters, pagination
+
 @app.route('/clips')
 @login_required
 def clips():
-    query = request.args.get('q', '').strip()[:200]
-    with get_db() as conn:
-        if query:
-            escaped = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            pattern = f"%{escaped}%"
-            rows = conn.execute("""
-                SELECT * FROM clips
-                WHERE user_id=? AND (
-                    content LIKE ? ESCAPE '\\' OR device LIKE ? ESCAPE '\\'
-                )
-                ORDER BY id DESC LIMIT 100
-            """, (session['user_id'], pattern, pattern)).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM clips WHERE user_id=? ORDER BY id DESC LIMIT 100",
-                (session['user_id'],),
-            ).fetchall()
-    return render_template("clips.html", rows=rows, q=query)
+    rows, devices, filters, pagination = history_page('clips', 'clips')
+    return render_template(
+        "clips.html", rows=rows, devices=devices,
+        filters=filters, pagination=pagination,
+    )
 @app.route('/api/clips')
 @login_required
 def api_clips():
@@ -545,7 +795,7 @@ def api_codes():
 def api_devices():
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id,name,platform FROM devices WHERE user_id=?",
+            "SELECT id,name,platform,sync_mode,last_seen_at,last_sync_at,client_version FROM devices WHERE user_id=?",
             (session['user_id'],),
         ).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -562,19 +812,49 @@ def api_files_json():
 @app.route('/codes')
 @login_required
 def codes():
-    with get_db() as conn:
-        rows = conn.execute("SELECT * FROM codes WHERE user_id=? ORDER BY id DESC LIMIT 100", (session['user_id'],)).fetchall()
-    return render_template("codes.html", rows=rows)
+    rows, devices, filters, pagination = history_page('codes', 'codes', include_pure_code=True)
+    return render_template(
+        "codes.html", rows=rows, devices=devices,
+        filters=filters, pagination=pagination,
+    )
 
 @app.route('/devices')
 @login_required
 def devices():
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id,name,platform FROM devices WHERE user_id=?",
+            "SELECT id,name,platform,sync_mode,last_seen_at,last_sync_at,client_version,token_hash FROM devices WHERE user_id=?",
             (session['user_id'],),
         ).fetchall()
-    return render_template("devices.html", rows=rows, user_id=session['user_id'])
+    with _socket_lock:
+        socket_device_ids = set(_socket_devices.values())
+    now = int(time.time())
+    device_rows = []
+    for row in rows:
+        item = dict(row)
+        item['online'] = row['id'] in socket_device_ids or (
+            row['last_seen_at'] and now - row['last_seen_at'] <= 90
+        )
+        item['token_active'] = bool(row['token_hash'])
+        device_rows.append(item)
+    return render_template("devices.html", rows=device_rows, user_id=session['user_id'])
+
+@app.route('/devices/<int:device_id>/sync-mode', methods=['POST'])
+@login_required
+def update_device_sync_mode(device_id):
+    mode = request.form.get('sync_mode', '')
+    if mode not in {'both', 'send_only', 'receive_only', 'paused'}:
+        abort(400)
+    with get_db() as conn:
+        cursor = conn.execute(
+            "UPDATE devices SET sync_mode=? WHERE id=? AND user_id=?",
+            (mode, device_id, session['user_id']),
+        )
+        conn.commit()
+    if not cursor.rowcount:
+        abort(404)
+    flash("设备同步模式已更新")
+    return redirect('/devices')
 
 @app.route('/delete/<target>/<int:id>', methods=['POST'])
 @login_required
@@ -803,11 +1083,12 @@ def upload_file():
     f.save(filepath)
     file_size = os.path.getsize(filepath)
 
-    now = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
+    created_ts = int(time.time())
+    now = datetime.datetime.fromtimestamp(created_ts).strftime("%m-%d %H:%M:%S")
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO files (user_id, filename, original_name, file_size, created_at) VALUES (?,?,?,?,?)",
-            (session['user_id'], unique_name, f.filename, file_size, now)
+            "INSERT INTO files (user_id, filename, original_name, file_size, created_at, created_ts) VALUES (?,?,?,?,?,?)",
+            (session['user_id'], unique_name, f.filename, file_size, now, created_ts)
         )
         conn.commit()
     flash(f"文件 {f.filename} 上传成功")
@@ -848,61 +1129,83 @@ def api_push():
     remote = client_ip()
     if rate_limited("api_push", token_digest(token) if token else remote, 180, 60):
         abort(429)
+    device = find_device_by_token(token)
+    if not device:
+        return {"error":"unauthorized"}, 403
+    if device['sync_mode'] not in {'both', 'send_only'}:
+        return {"status":"ignored", "reason":"sending_disabled"}, 200
+    body = request.get_json(silent=True) or {}
+    content = body.get("content", "")
+    if not isinstance(content, str) or not content:
+        return {"status":"no_content"}
+    if len(content) > 1_000_000:
+        return {"error":"clipboard_too_large"}, 413
+    event_id = str(body.get('event_id') or secrets.token_hex(16)).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,100}", event_id):
+        return {"error":"invalid_event_id"}, 400
+
     with get_db() as conn:
-        user_data = conn.execute("""
-            SELECT d.id, d.user_id, d.name, u.username
-            FROM devices d JOIN users u ON d.user_id = u.id
-            WHERE d.token_hash=?
-        """, (token_digest(token),)).fetchone()
+        existing = conn.execute(
+            "SELECT id FROM sync_events WHERE source_device_id=? AND event_id=?",
+            (device['id'], event_id),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE devices SET last_seen_at=?,last_sync_at=? WHERE id=?",
+                (int(time.time()), int(time.time()), device['id']),
+            )
+            conn.commit()
+            return {
+                "status":"ok", "event_id":event_id,
+                "revision":existing['id'], "duplicate":True,
+            }
 
-        if not user_data: return {"error":"unauthorized"}, 403
-
-        device_id = user_data['id']
-        uid, d_name, u_name = user_data['user_id'], user_data['name'], user_data['username']
-        body = request.get_json(silent=True) or {}
-        content = body.get("content", "")
-        if not content: return {"status":"no_content"}
-
-        # 1. 防抖检测
-        last_item = conn.execute("""
-            SELECT content FROM (
-                SELECT content, created_at FROM clips WHERE user_id=?
-                UNION ALL
-                SELECT content, created_at FROM codes WHERE user_id=?
-            ) ORDER BY created_at DESC LIMIT 1
-        """, (uid, uid)).fetchone()
-
+        last_item = conn.execute(
+            "SELECT content FROM sync_events WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (device['user_id'],),
+        ).fetchone()
         if last_item and content.strip() == last_item['content'].strip():
             return {"status":"ignored", "reason":"duplicate"}, 200
 
-        # 2. 识别逻辑
         pure = None
         is_long = len(content) > 120 or len(content.split('\n')) > 3
         is_code = any(x in content for x in ["import ", "={", "def ", "class ", "ro.", "persist.", "#!/"])
-
         if not (is_long or is_code):
             if any(k in content.lower() for k in ["验证码", "code", "校验码"]):
                 m = re.search(r'\b\d{2,3}\s?\d{2,3}\b', content)
                 if m: pure = m.group().replace(" ", "")
 
-        now = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
-        event_id = body.get('event_id') or secrets.token_hex(16)
+        created_ts = int(time.time())
+        now = datetime.datetime.fromtimestamp(created_ts).strftime("%m-%d %H:%M:%S")
         if pure:
-            conn.execute("INSERT INTO codes VALUES (NULL,?,?,?,?,?,0)", (uid, d_name, content, pure, now))
-            payload = {'type':'code','content':content,'pure_code':pure,'device':d_name,'device_id':device_id,'event_id':event_id}
+            conn.execute(
+                "INSERT INTO codes (user_id,device,content,pure_code,created_at,created_ts,is_favorite) VALUES (?,?,?,?,?,?,0)",
+                (device['user_id'], device['name'], content, pure, now, created_ts),
+            )
+            payload = {'type':'code','content':content,'pure_code':pure,'device':device['name'],'device_id':device['id'],'event_id':event_id}
         else:
-            conn.execute("INSERT INTO clips VALUES (NULL,?,?,?,?,0)", (uid, d_name, content, now))
-            payload = {'type':'clip','content':content,'device':d_name,'device_id':device_id,'event_id':event_id}
-
+            conn.execute(
+                "INSERT INTO clips (user_id,device,content,created_at,created_ts,is_favorite) VALUES (?,?,?,?,?,0)",
+                (device['user_id'], device['name'], content, now, created_ts),
+            )
+            payload = {'type':'clip','content':content,'device':device['name'],'device_id':device['id'],'event_id':event_id}
         event_cursor = conn.execute(
-            "INSERT INTO sync_events (user_id,source_device_id,item_type,content,pure_code,created_at) VALUES (?,?,?,?,?,?)",
-            (uid, device_id, payload['type'], content, pure, now),
+            "INSERT INTO sync_events (user_id,source_device_id,item_type,content,pure_code,created_at,created_ts,event_id) VALUES (?,?,?,?,?,?,?,?)",
+            (device['user_id'], device['id'], payload['type'], content, pure, now, created_ts, event_id),
         )
         payload['revision'] = event_cursor.lastrowid
-
-        socketio.emit('clipboard_update', payload, to=f'user_{uid}')
+        conn.execute(
+            "UPDATE devices SET last_seen_at=?,last_sync_at=? WHERE id=?",
+            (created_ts, created_ts, device['id']),
+        )
+        recipients = [row['id'] for row in conn.execute(
+            "SELECT id FROM devices WHERE user_id=? AND id<>? AND sync_mode IN ('both','receive_only')",
+            (device['user_id'], device['id']),
+        ).fetchall()]
         conn.commit()
-    return {"status":"ok", "event_id":event_id}
+    for recipient_id in recipients:
+        socketio.emit('clipboard_update', payload, to=f'device_{recipient_id}')
+    return {"status":"ok", "event_id":event_id, "revision":payload['revision']}
 
 @app.route('/api/latest')
 def api_latest():
@@ -910,24 +1213,42 @@ def api_latest():
     device = find_device_by_token(token)
     if not device:
         return {"error": "unauthorized"}, 403
+    if device['sync_mode'] not in {'both', 'receive_only'}:
+        return {"status": "disabled", "revision": 0}
     with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT COALESCE(MAX(id),0) FROM sync_events WHERE user_id=?",
+            (device['user_id'],),
+        ).fetchone()[0]
         row = conn.execute("""
-            SELECT e.id, e.item_type, d.name AS device, e.content, e.pure_code, e.created_at
+            SELECT e.id, e.item_type, d.name AS device, e.source_device_id AS device_id,
+                   e.content, e.pure_code, e.created_at
             FROM sync_events e LEFT JOIN devices d ON d.id=e.source_device_id
             WHERE e.user_id=? AND e.source_device_id<>?
             ORDER BY e.id DESC LIMIT 1
         """, (device['user_id'], device['id'])).fetchone()
     if not row:
-        return {"status": "empty"}
+        return {"status": "empty", "revision": cursor}
+    mark_device_synced(device['id'])
     return {
         "status": "ok",
-        "revision": row['id'],
+        "revision": cursor,
         "type": row['item_type'],
         "device": row['device'],
+        "device_id": row['device_id'],
         "content": row['content'],
         "pure_code": row['pure_code'],
         "created_at": row['created_at'],
     }
+
+@app.route('/api/ack', methods=['POST'])
+def api_ack():
+    token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    device = find_device_by_token(token)
+    if not device:
+        return {"error": "unauthorized"}, 403
+    mark_device_synced(device['id'])
+    return {"status": "ok"}
 
 @app.route('/api/poll')
 def api_poll():
@@ -940,20 +1261,30 @@ def api_poll():
         timeout = min(30, max(0, int(request.args.get('timeout', 25))))
     except ValueError:
         return {"error": "invalid cursor"}, 400
+    if device['sync_mode'] not in {'both', 'receive_only'}:
+        if timeout:
+            socketio.sleep(min(timeout, 5))
+        return {"status": "disabled", "revision": after}
     deadline = time.monotonic() + timeout
+    cursor = after
     while True:
         with get_db() as conn:
+            cursor = conn.execute(
+                "SELECT COALESCE(MAX(id),?) FROM sync_events WHERE user_id=?",
+                (after, device['user_id']),
+            ).fetchone()[0]
             row = conn.execute("""
                 SELECT e.id, e.item_type, d.name AS device, e.source_device_id AS device_id,
                        e.content, e.pure_code, e.created_at
                 FROM sync_events e LEFT JOIN devices d ON d.id=e.source_device_id
                 WHERE e.user_id=? AND e.source_device_id<>? AND e.id>?
-                ORDER BY e.id ASC LIMIT 1
+                ORDER BY e.id DESC LIMIT 1
             """, (device['user_id'], device['id'], after)).fetchone()
         if row:
+            mark_device_synced(device['id'])
             return {
                 "status": "ok",
-                "revision": row['id'],
+                "revision": cursor,
                 "type": row['item_type'],
                 "device": row['device'],
                 "device_id": row['device_id'],
@@ -962,7 +1293,7 @@ def api_poll():
                 "created_at": row['created_at'],
             }
         if time.monotonic() >= deadline:
-            return {"status": "timeout", "revision": after}
+            return {"status": "timeout", "revision": cursor}
         socketio.sleep(0.5)
 
 if __name__ == '__main__':

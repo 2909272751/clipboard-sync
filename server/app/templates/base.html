@@ -35,8 +35,8 @@
     <div id="toast">已复制到剪贴板</div>
     {% if session.user_id %}
     <div class="nav">
-        <a href="/">🏠 首页</a><a href="/clips">📋 剪贴板</a><a href="/codes">🚨 验证码</a><a href="/favorites">⭐ 收藏</a><a href="/files">📁 文件</a><a href="/devices">⚙️ 设备</a>
-        {% if session.is_admin %}<a href="/admin/invites">👥 注册管理</a>{% endif %}
+        <a href="/">🏠 首页</a><a href="/clips">📋 剪贴板</a><a href="/codes">🚨 验证码</a><a href="/favorites">⭐ 收藏</a><a href="/files">📁 文件</a><a href="/devices">⚙️ 设备</a><a href="/account">🔐 账号</a>
+        {% if session.is_admin %}<a href="/admin/invites">👥 注册管理</a><a href="/admin/users">🧑‍💼 用户管理</a>{% endif %}
         <form action="/logout" method="post" style="margin:0; display:inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn" style="background:var(--red); color:white; padding:10px 18px;">退出</button>

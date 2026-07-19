@@ -16,7 +16,7 @@ import requests
 import socketio
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 WM_CLIPBOARDUPDATE = 0x031D
 WM_DESTROY = 0x0002
 CF_UNICODETEXT = 13
@@ -76,6 +76,29 @@ def load_config():
     show_notifications = config.get("show_notifications", True)
     config["show_notifications"] = str(show_notifications).lower() not in {"0", "false", "no"}
     return config
+
+
+def load_client_state(path):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            state = json.load(handle)
+        revision = max(0, int(state.get("revision", 0)))
+        pending = state.get("pending")
+        if not isinstance(pending, dict) or not pending.get("content") or not pending.get("event_id"):
+            pending = None
+        return {"revision": revision, "pending": pending}
+    except Exception:
+        return {"revision": 0, "pending": None}
+
+
+def save_client_state(path, revision, pending):
+    temporary = path.with_suffix(".tmp")
+    payload = {"revision": int(revision), "pending": pending}
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def configure_logging():
@@ -331,12 +354,47 @@ class ClipboardSyncClient:
         self.config = config
         self.events = queue.Queue(maxsize=1)
         self.state_lock = threading.Lock()
+        self.state_path = app_dir() / "client-state.json"
+        saved_state = load_client_state(self.state_path)
+        self.revision = saved_state["revision"]
+        self.pending_upload = saved_state["pending"]
         initial = read_clipboard_text()
         self.last_uploaded_hash = content_hash(initial) if initial else ""
         self.last_remote_hash = ""
         self.notifier = WindowsNotifier(config.get("show_notifications", True))
         self.sio = socketio.Client(reconnection=True, logger=False, engineio_logger=False)
         self.sio.on("clipboard_update", self.on_remote_clipboard)
+        self.sio.on("connect", self.on_socket_connect)
+        self.sio.on("disconnect", self.on_socket_disconnect)
+        self.socket_connected = threading.Event()
+        self.recovery_signal = threading.Event()
+
+    def api_headers(self):
+        return {
+            "Authorization": f"Bearer {self.config['device_token']}",
+            "X-Client-Version": VERSION,
+        }
+
+    def persist_state(self):
+        with self.state_lock:
+            revision = self.revision
+            pending = dict(self.pending_upload) if self.pending_upload else None
+        try:
+            save_client_state(self.state_path, revision, pending)
+        except Exception:
+            logging.exception("Unable to save client state")
+
+    def replace_pending(self, text):
+        pending = {"content": text, "event_id": uuid.uuid4().hex}
+        with self.state_lock:
+            self.pending_upload = pending
+        self.persist_state()
+
+    def clear_pending(self, event_id):
+        with self.state_lock:
+            if self.pending_upload and self.pending_upload.get("event_id") == event_id:
+                self.pending_upload = None
+        self.persist_state()
 
     def notify_change(self):
         try:
@@ -344,32 +402,62 @@ class ClipboardSyncClient:
         except queue.Full:
             pass
 
+    def on_socket_connect(self):
+        self.socket_connected.set()
+        self.recovery_signal.set()
+        logging.info("Realtime connection established")
+
+    def on_socket_disconnect(self):
+        self.socket_connected.clear()
+        self.recovery_signal.set()
+        logging.info("Realtime connection disconnected")
+
     def on_remote_clipboard(self, data):
         try:
             if int(data.get("device_id", -1)) == self.config["device_id"]:
-                return
+                return True
             text = data.get("pure_code") if data.get("type") == "code" else data.get("content")
             if not isinstance(text, str) or not text:
-                return
+                return True
             digest = content_hash(text)
             with self.state_lock:
                 if digest == self.last_remote_hash:
-                    return
-                self.last_remote_hash = digest
-                self.last_uploaded_hash = digest
+                    return True
             if write_clipboard_text(text):
+                with self.state_lock:
+                    self.last_remote_hash = digest
+                    self.last_uploaded_hash = digest
                 device = str(data.get("device") or "其他设备")
                 logging.info("Received clipboard from device %s", device)
                 self.notifier.show(
                     "Clipboard Sync 已接收",
                     f"来自 {notification_preview(device)}：{notification_preview(text)}",
                 )
+                revision = max(0, int(data.get("revision", 0)))
+                with self.state_lock:
+                    self.revision = max(self.revision, revision)
+                self.persist_state()
+                try:
+                    requests.post(
+                        f"{self.config['server_url']}/api/ack",
+                        json={"revision": revision},
+                        headers=self.api_headers(),
+                        timeout=5,
+                    )
+                except Exception:
+                    logging.warning("Unable to acknowledge received clipboard")
+                return True
             else:
                 logging.warning("Unable to write remote clipboard")
+                return False
         except Exception:
             logging.exception("Remote clipboard handler failed")
+            return False
 
     def upload_worker(self):
+        if self.pending_upload:
+            self.notify_change()
+        retry_delay = 2
         while True:
             self.events.get()
             time.sleep(0.15)
@@ -380,40 +468,124 @@ class ClipboardSyncClient:
                     break
 
             text = read_clipboard_text()
-            if not text:
-                continue
-            digest = content_hash(text)
+            digest = content_hash(text) if text else ""
             with self.state_lock:
-                if digest in {self.last_uploaded_hash, self.last_remote_hash}:
-                    continue
+                duplicate = digest and digest in {self.last_uploaded_hash, self.last_remote_hash}
+                pending = dict(self.pending_upload) if self.pending_upload else None
+            if text and not duplicate and (not pending or pending.get("content") != text):
+                self.replace_pending(text)
 
-            try:
-                response = requests.post(
-                    f"{self.config['server_url']}/api/push",
-                    json={"content": text, "event_id": uuid.uuid4().hex},
-                    headers={"Authorization": f"Bearer {self.config['device_token']}"},
-                    timeout=8,
-                )
-                result = response.json() if response.ok else {}
-                status = result.get("status")
-                if response.ok and status == "ok":
-                    with self.state_lock:
-                        self.last_uploaded_hash = digest
-                    logging.info("Uploaded clipboard, length=%d", len(text))
-                    self.notifier.show(
-                        "Clipboard Sync 已上传",
-                        notification_preview(text),
+            while True:
+                with self.state_lock:
+                    pending = dict(self.pending_upload) if self.pending_upload else None
+                if not pending:
+                    retry_delay = 2
+                    break
+                pending_text = pending["content"]
+                event_id = pending["event_id"]
+                try:
+                    response = requests.post(
+                        f"{self.config['server_url']}/api/push",
+                        json={"content": pending_text, "event_id": event_id},
+                        headers=self.api_headers(),
+                        timeout=10,
                     )
-                elif response.ok and status == "ignored":
+                    result = response.json() if response.ok else {}
+                    status = result.get("status")
+                    if response.ok and status == "ok":
+                        with self.state_lock:
+                            self.last_uploaded_hash = content_hash(pending_text)
+                            self.revision = max(self.revision, int(result.get("revision", 0)))
+                        self.clear_pending(event_id)
+                        logging.info("Uploaded clipboard, length=%d", len(pending_text))
+                        self.notifier.show("Clipboard Sync 已上传", notification_preview(pending_text))
+                        retry_delay = 2
+                        continue
+                    if response.ok and status == "ignored":
+                        with self.state_lock:
+                            self.last_uploaded_hash = content_hash(pending_text)
+                        self.clear_pending(event_id)
+                        logging.info("Upload ignored by server: %s", result.get("reason"))
+                        retry_delay = 2
+                        continue
+                    logging.warning("Upload failed with HTTP %s status=%s", response.status_code, status)
+                except Exception:
+                    logging.exception("Clipboard upload failed; keeping latest item for retry")
+
+                try:
+                    self.events.get(timeout=retry_delay)
+                    time.sleep(0.15)
+                    while True:
+                        try:
+                            self.events.get_nowait()
+                        except queue.Empty:
+                            break
+                    replacement = read_clipboard_text()
+                    if replacement and content_hash(replacement) not in {self.last_uploaded_hash, self.last_remote_hash}:
+                        self.replace_pending(replacement)
+                    retry_delay = 2
+                except queue.Empty:
+                    retry_delay = min(retry_delay * 2, 60)
+
+    def recover_once(self, timeout):
+        try:
+            with self.state_lock:
+                after = self.revision
+            response = requests.get(
+                f"{self.config['server_url']}/api/poll",
+                params={"after": after, "timeout": timeout},
+                headers=self.api_headers(),
+                timeout=timeout + 10,
+            )
+            data = response.json() if response.ok else {}
+            status = data.get("status")
+            if response.ok and status == "ok":
+                if not self.on_remote_clipboard(data):
+                    return False
+            if response.ok and status in {"ok", "timeout", "empty"}:
+                with self.state_lock:
+                    self.revision = max(self.revision, int(data.get("revision", after)))
+                self.persist_state()
+            elif status == "disabled":
+                time.sleep(5)
+            elif not response.ok:
+                raise RuntimeError(f"HTTP {response.status_code}")
+            return True
+        except Exception:
+            logging.exception("Missed clipboard recovery failed")
+            return False
+
+    def recovery_worker(self):
+        if self.revision == 0:
+            try:
+                response = requests.get(
+                    f"{self.config['server_url']}/api/latest",
+                    headers=self.api_headers(),
+                    timeout=10,
+                )
+                data = response.json() if response.ok else {}
+                if data.get("status") == "ok":
+                    if not self.on_remote_clipboard(data):
+                        return
+                if response.ok:
                     with self.state_lock:
-                        self.last_uploaded_hash = digest
-                    logging.info("Upload ignored by server as duplicate")
-                elif response.ok:
-                    logging.warning("Upload returned status=%s", status)
-                else:
-                    logging.warning("Upload failed with HTTP %s", response.status_code)
+                        self.revision = max(self.revision, int(data.get("revision", 0)))
+                    self.persist_state()
             except Exception:
-                logging.exception("Clipboard upload failed")
+                logging.exception("Initial clipboard recovery failed")
+        delay = 2
+        while True:
+            if self.socket_connected.is_set():
+                self.recovery_signal.wait()
+                self.recovery_signal.clear()
+                if self.socket_connected.is_set():
+                    self.recover_once(0)
+                continue
+            if self.recover_once(25):
+                delay = 2
+            else:
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
 
     def socket_worker(self):
         delay = 2
@@ -422,11 +594,11 @@ class ClipboardSyncClient:
                 self.sio.connect(
                     self.config["server_url"],
                     auth={"token": self.config["device_token"]},
+                    headers={"X-Client-Version": VERSION},
                     transports=["websocket"],
                     wait_timeout=10,
                 )
                 delay = 2
-                logging.info("Realtime connection established")
                 self.sio.wait()
             except Exception:
                 logging.exception("Realtime connection failed; retrying in %ss", delay)
@@ -435,6 +607,7 @@ class ClipboardSyncClient:
 
     def run(self):
         threading.Thread(target=self.upload_worker, daemon=True).start()
+        threading.Thread(target=self.recovery_worker, daemon=True).start()
         threading.Thread(target=self.socket_worker, daemon=True).start()
         run_clipboard_listener(
             self.notify_change,

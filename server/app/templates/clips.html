@@ -2,17 +2,20 @@
 {% block content %}
 <div class="card">
     <h3 style="margin-top:0">📋 剪贴板历史</h3>
-    <form method="GET" action="/clips" style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
-        <input type="search" name="q" value="{{ q }}" maxlength="200" placeholder="搜索剪贴板内容或来源设备" style="margin:0; flex:1;">
-        <button type="submit" class="btn" style="background:var(--main); color:white; white-space:nowrap;">搜索</button>
-        {% if q %}<a href="/clips" class="btn" style="background:#eee; color:#555; text-decoration:none; white-space:nowrap;">清空</a>{% endif %}
+    <form method="GET" action="/clips" style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
+        <input type="search" name="q" value="{{ filters.q }}" maxlength="200" placeholder="搜索内容" style="margin:0; grid-column:1 / -1;">
+        <select name="device" style="margin:0;"><option value="">全部设备</option>{% for name in devices %}<option value="{{ name }}" {% if filters.device == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>
+        <select name="per_page" style="margin:0;">{% for size in [20,50,100] %}<option value="{{ size }}" {% if pagination.per_page == size %}selected{% endif %}>每页 {{ size }} 条</option>{% endfor %}</select>
+        <input type="date" name="date_from" value="{{ filters.date_from }}" title="开始日期" style="margin:0;">
+        <input type="date" name="date_to" value="{{ filters.date_to }}" title="结束日期" style="margin:0;">
+        <button type="submit" class="btn" style="background:var(--main); color:white;">筛选</button>
+        <a href="/clips" class="btn" style="background:#eee; color:#555; text-decoration:none; text-align:center;">重置</a>
     </form>
-    {% if q %}<p style="margin:8px 0 12px; color:#777; font-size:14px;">“{{ q }}”的搜索结果：{{ rows|length }} 条</p>{% endif %}
+    <p style="margin:8px 0 12px; color:#777; font-size:14px;">共 {{ pagination.total }} 条，当前第 {{ pagination.page }}/{{ pagination.pages }} 页；分页和筛选不会删除任何历史。</p>
     <form id="bulkForm" action="/api/bulk_delete" method="POST">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="target" value="clip">
         <input type="hidden" name="action" id="bulkAction" value="delete_selected">
-
         {% for r in rows %}
         <div class="item-row">
             <input type="checkbox" name="item_ids" value="{{r.id}}" style="width:22px; height:22px; margin-top:15px;">
@@ -22,20 +25,16 @@
                     <span style="color:#666; font-size:14px; font-weight:bold;">{{ r.device }} · {{ r.created_at }}</span>
                     <button type="button" onclick="deleteItem('clip', {{ r.id }})" style="color:var(--red); border:0; background:none; cursor:pointer; font-size:14px;">删除</button>
                 </div>
-
-                <div class="content-box" style="cursor: pointer; white-space: pre-wrap;" onclick='copyText({{ r.content.replace("\\n", "\n")|tojson }})'>{{ r.content.replace("\\n", "\n") }}</div>
+                <div class="content-box" style="cursor:pointer; white-space:pre-wrap;" onclick='copyText({{ r.content.replace("\\n", "\n")|tojson }})'>{{ r.content.replace("\\n", "\n") }}</div>
             </div>
         </div>
-        {% else %}
-        <p style="text-align:center; color:#999;">{% if q %}没有找到匹配记录{% else %}暂无记录{% endif %}</p>
-        {% endfor %}
-
-        {% if rows %}
-        <div class="bulk-bar">
-            <button type="button" onclick="submitBulk('delete_selected')" class="btn" style="background:var(--red); color:white; flex:1">删除选中</button>
-            <button type="button" onclick="submitBulk('clear_all')" class="btn" style="background:#d63031; color:white; flex:1">清空全部</button>
-        </div>
-        {% endif %}
+        {% else %}<p style="text-align:center; color:#999;">没有找到匹配记录</p>{% endfor %}
+        {% if rows %}<div class="bulk-bar"><button type="button" onclick="submitBulk('delete_selected')" class="btn" style="background:var(--red); color:white; flex:1">删除选中</button><button type="button" onclick="submitBulk('clear_all')" class="btn" style="background:#d63031; color:white; flex:1">清空全部</button></div>{% endif %}
     </form>
+    {% if pagination.pages > 1 %}<div style="display:flex; gap:8px; justify-content:center; align-items:center; flex-wrap:wrap; margin-top:20px;">
+        {% if pagination.prev_url %}<a class="btn" href="{{ pagination.prev_url }}" style="background:#eee; text-decoration:none;">上一页</a>{% endif %}
+        {% for number,url in pagination.links %}<a class="btn" href="{{ url }}" style="text-decoration:none; background:{{ 'var(--main)' if number == pagination.page else '#eee' }}; color:{{ 'white' if number == pagination.page else '#333' }};">{{ number }}</a>{% endfor %}
+        {% if pagination.next_url %}<a class="btn" href="{{ pagination.next_url }}" style="background:#eee; text-decoration:none;">下一页</a>{% endif %}
+    </div>{% endif %}
 </div>
 {% endblock %}

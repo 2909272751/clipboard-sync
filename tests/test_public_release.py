@@ -94,7 +94,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("application/zip", response.content_type)
-        self.assertIn("clipboard-sync-v1.2.0-magisk-device-", response.headers["Content-Disposition"])
+        self.assertIn("clipboard-sync-v1.3.0-magisk-device-", response.headers["Content-Disposition"])
         self.assertIn("no-store", response.headers["Cache-Control"])
 
         with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
@@ -108,7 +108,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
             config = archive.read("config.conf").decode("utf-8")
             module_prop = archive.read("module.prop").decode("utf-8")
 
-        self.assertIn("version=1.2.0", module_prop)
+        self.assertIn("version=1.3.0", module_prop)
         self.assertNotIn("POLL_SECONDS", config)
         self.assertIn("SHOW_TOAST=1", config)
         self.assertIn("SERVER_URL='https://sync.example.test'", config)
@@ -221,11 +221,11 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("clipboard-sync-v1.2.0-windows-device-", response.headers["Content-Disposition"])
+        self.assertIn("clipboard-sync-v1.3.0-windows-device-", response.headers["Content-Disposition"])
         self.assertIn("no-store", response.headers["Cache-Control"])
         with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
             names = set(archive.namelist())
-            self.assertIn("clipboard-sync-windows-v1.2.0.exe", names)
+            self.assertIn("clipboard-sync-windows-v1.3.0.exe", names)
             self.assertIn("config.json", names)
             self.assertIn("安装并启动.cmd", names)
             self.assertIn("卸载.cmd", names)
@@ -298,10 +298,12 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
         self.assertEqual(user[1:], (None, None))
         self.assertEqual(device, (None, hashlib.sha256(raw_token.encode()).hexdigest()))
 
-    def test_android_bridge_deduplicates_callbacks_and_previews_toasts(self):
+    def test_android_bridge_persists_latest_upload_and_previews_toasts(self):
         source = ANDROID_BRIDGE_SOURCE.read_text(encoding="utf-8")
-        self.assertIn("pendingUploadHashes.contains(digest)", source)
-        self.assertIn("pendingUploadHashes.add(digest)", source)
+        self.assertIn('new File(config.stateDirectory, "pending-upload.json")', source)
+        self.assertIn("queueLatestUpload(text, digest)", source)
+        self.assertIn("persistPendingLocked()", source)
+        self.assertIn("pendingLock.wait(retrySeconds * 1000L)", source)
         self.assertIn('if ("ok".equals(status))', source)
         self.assertIn('showToast("已上传：" + toastPreview(text))', source)
         self.assertIn('showToast("已接收（" + toastPreview(device)', source)
@@ -319,6 +321,10 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
     def test_windows_client_notifies_only_confirmed_syncs(self):
         source = WINDOWS_CLIENT_SOURCE.read_text(encoding="utf-8")
         self.assertIn("class WindowsNotifier", source)
+        self.assertIn('self.state_path = app_dir() / "client-state.json"', source)
+        self.assertIn("self.replace_pending(text)", source)
+        self.assertIn("def recovery_worker(self):", source)
+        self.assertIn('f"{self.config[\'server_url\']}/api/poll"', source)
         self.assertIn('status == "ok"', source)
         self.assertIn('status == "ignored"', source)
         self.assertIn('"Clipboard Sync 已上传"', source)
@@ -391,6 +397,183 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
         self.assertEqual(updates[0]["args"][0]["content"], content)
         self.assertEqual(updates[0]["args"][0]["event_id"], "test-event-id")
         socket_client.disconnect()
+
+    def test_push_event_id_is_idempotent_and_records_client_status(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            user_id = conn.execute(
+                "SELECT id FROM users WHERE username=?", ("test-user",)
+            ).fetchone()[0]
+            token = secrets_token = hashlib.sha256(str(time.time_ns()).encode()).hexdigest()
+            cursor = conn.execute(
+                "INSERT INTO devices (user_id,name,token_hash,platform) VALUES (?,?,?,?)",
+                (user_id, "idempotent-device", hashlib.sha256(token.encode()).hexdigest(), "windows"),
+            )
+            device_id = cursor.lastrowid
+            conn.commit()
+
+        event_id = f"event-{time.time_ns()}"
+        content = f"idempotent-content-{time.time_ns()}"
+        headers = {
+            "Authorization": f"Bearer {secrets_token}",
+            "X-Client-Version": "1.3.0",
+        }
+        first = self.client.post("/api/push", json={"content": content, "event_id": event_id}, headers=headers)
+        second = self.client.post("/api/push", json={"content": content, "event_id": event_id}, headers=headers)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.get_json()["duplicate"], True)
+        self.assertEqual(first.get_json()["revision"], second.get_json()["revision"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM sync_events WHERE source_device_id=? AND event_id=?", (device_id, event_id)).fetchone()[0],
+                1,
+            )
+            status = conn.execute(
+                "SELECT client_version,last_seen_at,last_sync_at FROM devices WHERE id=?", (device_id,)
+            ).fetchone()
+        self.assertEqual(status[0], "1.3.0")
+        self.assertTrue(status[1])
+        self.assertTrue(status[2])
+
+    def test_device_sync_modes_are_enforced(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            user_id = conn.execute("SELECT id FROM users WHERE username='test-user'").fetchone()[0]
+            blocked_token = hashlib.sha256(f"blocked-{time.time_ns()}".encode()).hexdigest()
+            receive_token = hashlib.sha256(f"receive-{time.time_ns()}".encode()).hexdigest()
+            conn.execute(
+                "INSERT INTO devices (user_id,name,token_hash,platform,sync_mode) VALUES (?,?,?,?,?)",
+                (user_id, "receive-only", hashlib.sha256(blocked_token.encode()).hexdigest(), "generic", "receive_only"),
+            )
+            conn.execute(
+                "INSERT INTO devices (user_id,name,token_hash,platform,sync_mode) VALUES (?,?,?,?,?)",
+                (user_id, "send-only", hashlib.sha256(receive_token.encode()).hexdigest(), "generic", "send_only"),
+            )
+            conn.commit()
+
+        blocked = self.client.post(
+            "/api/push",
+            json={"content": f"blocked-{time.time_ns()}", "event_id": f"blocked-{time.time_ns()}"},
+            headers={"Authorization": f"Bearer {blocked_token}"},
+        )
+        self.assertEqual(blocked.get_json(), {"status": "ignored", "reason": "sending_disabled"})
+        disabled_receive = self.client.get(
+            "/api/latest", headers={"Authorization": f"Bearer {receive_token}"}
+        )
+        self.assertEqual(disabled_receive.get_json()["status"], "disabled")
+
+    def test_poll_recovers_only_the_latest_missed_clipboard(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            user_id = conn.execute("SELECT id FROM users WHERE username='test-user'").fetchone()[0]
+            sender = hashlib.sha256(f"sender-{time.time_ns()}".encode()).hexdigest()
+            receiver = hashlib.sha256(f"receiver-{time.time_ns()}".encode()).hexdigest()
+            conn.execute("INSERT INTO devices (user_id,name,token_hash,platform) VALUES (?,?,?,?)", (user_id, "recovery-sender", hashlib.sha256(sender.encode()).hexdigest(), "generic"))
+            conn.execute("INSERT INTO devices (user_id,name,token_hash,platform) VALUES (?,?,?,?)", (user_id, "recovery-receiver", hashlib.sha256(receiver.encode()).hexdigest(), "windows"))
+            conn.commit()
+        first = f"missed-first-{time.time_ns()}"
+        latest = f"missed-latest-{time.time_ns()}"
+        for content in (first, latest):
+            response = self.client.post(
+                "/api/push",
+                json={"content": content, "event_id": f"recover-{time.time_ns()}"},
+                headers={"Authorization": f"Bearer {sender}"},
+            )
+            self.assertEqual(response.get_json()["status"], "ok")
+        recovered = self.client.get(
+            "/api/poll?after=0&timeout=0",
+            headers={"Authorization": f"Bearer {receiver}", "X-Client-Version": "1.3.0"},
+        ).get_json()
+        self.assertEqual(recovered["status"], "ok")
+        self.assertEqual(recovered["content"], latest)
+
+    def test_history_pagination_filters_without_deleting_records(self):
+        marker = f"pagination-{time.time_ns()}"
+        created_ts = int(time.time())
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            user_id = conn.execute("SELECT id FROM users WHERE username='test-user'").fetchone()[0]
+            conn.executemany(
+                "INSERT INTO clips (user_id,device,content,created_at,created_ts,is_favorite) VALUES (?,?,?,?,?,0)",
+                [(user_id, "pagination-device", f"{marker}-{index:02d}", "07-19 12:00:00", created_ts) for index in range(55)],
+            )
+            conn.commit()
+        response = self.client.get(
+            f"/clips?q={marker}&device=pagination-device&per_page=20&page=2",
+            base_url=self.base_url,
+        )
+        page = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("共 55 条", page)
+        self.assertIn("当前第 2/3 页", page)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM clips WHERE user_id=? AND content LIKE ?",
+                (user_id, f"{marker}%"),
+            ).fetchone()[0]
+        self.assertEqual(remaining, 55)
+
+    def test_admin_can_disable_user_without_deleting_history(self):
+        username = f"managed-{time.time_ns()}"
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.execute(
+                "INSERT INTO users (username,password,is_admin) VALUES (?,?,0)",
+                (username, self.module.generate_password_hash("managed-password-123")),
+            )
+            user_id = cursor.lastrowid
+            conn.execute(
+                "INSERT INTO clips (user_id,device,content,created_at,created_ts) VALUES (?,?,?,?,?)",
+                (user_id, "managed-device", "preserve-me", "07-19 12:00:00", int(time.time())),
+            )
+            conn.commit()
+        response = self.secure_post(
+            f"/admin/users/{user_id}/action",
+            data={"action": "toggle_disabled"},
+            base_url=self.base_url,
+        )
+        self.assertEqual(response.status_code, 302)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            state = conn.execute("SELECT disabled FROM users WHERE id=?", (user_id,)).fetchone()[0]
+            history = conn.execute("SELECT COUNT(*) FROM clips WHERE user_id=?", (user_id,)).fetchone()[0]
+        self.assertEqual(state, 1)
+        self.assertEqual(history, 1)
+
+    def test_user_can_change_own_password(self):
+        username = f"password-user-{time.time_ns()}"
+        old_password = "old-password-123"
+        new_password = "new-password-456"
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.execute(
+                "INSERT INTO users (username,password,is_admin) VALUES (?,?,0)",
+                (username, self.module.generate_password_hash(old_password)),
+            )
+            user_id = cursor.lastrowid
+            conn.commit()
+
+        user_client = self.module.app.test_client()
+        user_client.get("/login", base_url=self.base_url)
+        with user_client.session_transaction(base_url=self.base_url) as state:
+            login_csrf = state["_csrf_token"]
+        login = user_client.post(
+            "/login",
+            data={"username": username, "password": old_password, "csrf_token": login_csrf},
+            base_url=self.base_url,
+        )
+        self.assertEqual(login.status_code, 302)
+        self.assertEqual(user_client.get("/account", base_url=self.base_url).status_code, 200)
+        with user_client.session_transaction(base_url=self.base_url) as state:
+            account_csrf = state["_csrf_token"]
+        changed = user_client.post(
+            "/account",
+            data={
+                "current_password": old_password,
+                "new_password": new_password,
+                "confirm_password": new_password,
+                "csrf_token": account_csrf,
+            },
+            base_url=self.base_url,
+        )
+        self.assertEqual(changed.status_code, 302)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            stored = conn.execute("SELECT password FROM users WHERE id=?", (user_id,)).fetchone()[0]
+        self.assertTrue(self.module.check_password_hash(stored, new_password))
+        self.assertFalse(self.module.check_password_hash(stored, old_password))
 
 
 if __name__ == "__main__":

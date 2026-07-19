@@ -1,4 +1,4 @@
-Clipboard Sync Windows v1.2.0
+Clipboard Sync Windows v1.3.0
 
 1. 解压整个 ZIP，不要只单独运行压缩包里的文件。
 2. 双击“安装并启动.cmd”。

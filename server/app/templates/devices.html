@@ -45,7 +45,22 @@
                 <b style="font-size:18px;">{{ r.name }}</b>
                 <button type="button" onclick="deleteItem('device', {{ r.id }})" style="color:var(--red); border:0; background:none; cursor:pointer; font-size:14px; font-weight:bold;">删除</button>
             </div>
-            <div style="margin-top:8px; color:#888; font-size:13px;">类型：{{ r.platform }}</div>
+            <div style="margin-top:8px; color:#777; font-size:13px; line-height:1.7;">
+                类型：{{ r.platform }} · <b style="color:{{ '#00b894' if r.online else '#999' }};">{{ '在线' if r.online else '离线' }}</b><br>
+                客户端：{{ r.client_version or '旧版本/未知' }} · 令牌：{{ '有效' if r.token_active else '失效' }}<br>
+                最后在线：{{ format_timestamp(r.last_seen_at) }}<br>
+                最后同步：{{ format_timestamp(r.last_sync_at) }}
+            </div>
+            <form action="/devices/{{ r.id }}/sync-mode" method="post" style="display:flex; gap:8px; align-items:center; margin-top:10px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <select name="sync_mode" style="margin:0; flex:1;">
+                    <option value="both" {% if r.sync_mode == 'both' %}selected{% endif %}>双向同步</option>
+                    <option value="send_only" {% if r.sync_mode == 'send_only' %}selected{% endif %}>仅发送</option>
+                    <option value="receive_only" {% if r.sync_mode == 'receive_only' %}selected{% endif %}>仅接收</option>
+                    <option value="paused" {% if r.sync_mode == 'paused' %}selected{% endif %}>暂停同步</option>
+                </select>
+                <button type="submit" class="btn" style="background:#636e72; color:white; white-space:nowrap;">保存模式</button>
+            </form>
             {% if r.platform == 'android_magisk' %}
             <form action="/devices/{{ r.id }}/magisk-module" method="post" style="margin-top:10px;">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

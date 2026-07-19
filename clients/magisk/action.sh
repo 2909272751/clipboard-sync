@@ -3,7 +3,7 @@
 STATE_DIR=/data/adb/clipboard-sync
 LOG_FILE="$STATE_DIR/clipboard-sync.log"
 
-echo "Clipboard Sync v1.2.0"
+echo "Clipboard Sync v1.3.0"
 if pgrep -f 'com.clipsync.bridge.Main' >/dev/null 2>&1; then
   echo "Status: running (event driven)"
 else

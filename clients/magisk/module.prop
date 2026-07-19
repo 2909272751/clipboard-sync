@@ -1,6 +1,6 @@
 id=clipboard_sync_uploader
 name=Clipboard Sync Uploader
-version=1.2.0
-versionCode=14
+version=1.3.0
+versionCode=15
 author=Clipboard Sync contributors
 description=Event-driven Android clipboard sync with Android 16 identity compatibility. No APK, Python, curl or periodic clipboard scan.
