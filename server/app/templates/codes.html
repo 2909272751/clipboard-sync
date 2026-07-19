@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h3 style="margin-top:0; color:var(--main);">🚨 验证码记录</h3>
+    <form id="bulkForm" action="/api/bulk_delete" method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="target" value="code">
+        <input type="hidden" name="action" id="bulkAction" value="delete_selected">
+        {% for r in rows %}
+        <div class="item-row">
+            <input type="checkbox" name="item_ids" value="{{r.id}}" style="width:22px; height:22px; margin-top:20px;">
+            <button class="fav-btn {% if r.is_favorite %}active{% endif %}" onclick="toggleFavorite('code', {{r.id}}, this)" type="button" style="margin-top:8px;">{% if r.is_favorite %}⭐{% else %}☆{% endif %}</button>
+            <div style="flex:1">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <b onclick="copyText('{{r.pure_code}}')" style="font-size:36px; color:var(--main); cursor:pointer; background:#f0edff; padding:8px 20px; border-radius:15px; letter-spacing:2px;">{{ r.pure_code }}</b>
+                    <button type="button" onclick="deleteItem('code', {{ r.id }})" style="color:var(--red); border:0; background:none; cursor:pointer; font-size:14px;">删除</button>
+                </div>
+                <div style="margin-top:10px; color:#999; font-size:13px; font-weight:bold;">{{ r.device }} · {{ r.created_at }}</div>
+                <div class="content-box">{{ r.content }}</div>
+            </div>
+        </div>
+        {% else %}<p style="text-align:center; color:#999;">暂无记录</p>{% endfor %}
+        {% if rows %}
+        <div class="bulk-bar">
+            <button type="button" onclick="submitBulk('delete_selected')" class="btn" style="background:var(--red); color:white; flex:1">删除选中</button>
+            <button type="button" onclick="submitBulk('clear_all')" class="btn" style="background:#d63031; color:white; flex:1">一键清空</button>
+        </div>
+        {% endif %}
+    </form>
+</div>
+{% endblock %}

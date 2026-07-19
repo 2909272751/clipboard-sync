@@ -1,0 +1,63 @@
+#!/system/bin/sh
+
+MODDIR=${1:-${0%/system/bin/*}}
+STATE_DIR=/data/adb/clipboard-sync
+RUNTIME_DIR=/data/local/tmp/clipboard-sync
+CONFIG_FILE="$RUNTIME_DIR/config.conf"
+LOG_FILE="$STATE_DIR/clipboard-sync.log"
+PID_FILE="$STATE_DIR/clipboard-syncd.pid"
+BRIDGE_JAR="$RUNTIME_DIR/clipbridge.jar"
+
+mkdir -p "$STATE_DIR"
+
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
+}
+
+if [ -f "$PID_FILE" ]; then
+  OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
+  case "$OLD_PID" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null \
+          && tr '\000' ' ' < "/proc/$OLD_PID/cmdline" 2>/dev/null | grep -q 'clipboard-syncd'; then
+        log "supervisor already running as pid $OLD_PID"
+        exit 0
+      fi
+      ;;
+  esac
+fi
+
+echo "$$" > "$PID_FILE"
+cleanup() {
+  [ "$(cat "$PID_FILE" 2>/dev/null)" = "$$" ] && rm -f "$PID_FILE"
+}
+trap cleanup EXIT HUP INT TERM
+
+if [ ! -r "$BRIDGE_JAR" ]; then
+  log "bridge missing: $BRIDGE_JAR"
+  exit 1
+fi
+
+if su 1000 -c 'id -u' 2>/dev/null | grep -q '^1000$'; then
+  BRIDGE_UID=1000
+else
+  log "Android system UID 1000 is unavailable"
+  exit 1
+fi
+
+delay=2
+while true; do
+  if [ ! -r "$CONFIG_FILE" ]; then
+    log "config unavailable: $CONFIG_FILE"
+    sleep 30
+    continue
+  fi
+
+  log "starting event bridge as Android system UID $BRIDGE_UID"
+  su "$BRIDGE_UID" -c "CLASSPATH='$BRIDGE_JAR' /system/bin/app_process /system/bin com.clipsync.bridge.Main '$CONFIG_FILE'" >> "$LOG_FILE" 2>&1
+  log "event bridge exited; retrying in ${delay}s"
+  sleep "$delay"
+  [ "$delay" -lt 60 ] && delay=$((delay * 2))
+  [ "$delay" -gt 60 ] && delay=60
+done

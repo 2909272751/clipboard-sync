@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h3 style="margin-top:0; color:var(--main);">⚙️ 设备管理</h3>
+    <p style="color:#666; line-height:1.6;">为手机生成一个已经写入服务器地址和专属 Token 的 Magisk 模块。下载后直接在 Magisk 中刷入并重启即可，不需要再编辑配置。</p>
+    <form action="/devices/magisk-module" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="text" name="name" maxlength="80" placeholder="手机名称（例如：小米9、朋友的手机）" required>
+        <button type="submit" class="btn btn-main">生成并下载 Magisk 模块</button>
+    </form>
+    <div style="margin-top:14px; padding:14px; background:#f4f2ff; border-radius:10px; line-height:1.7; color:#4c3fa3;">
+        <b>使用方法</b><br>
+        1. 下载 ZIP 后不要解压。<br>
+        2. 打开 Magisk → 模块 → 从本地安装，选择下载的 ZIP。<br>
+        3. 安装完成后重启手机，模块会自动使用内置配置连接服务器。
+    </div>
+    <div style="margin-top:12px; padding:12px; background:#fff4d6; border-radius:10px; color:#8a6200; font-size:14px; line-height:1.5;">
+        下载的 ZIP 包含该设备的专属凭据，请不要转发给其他人。需要给朋友使用时，让朋友登录自己的账号后在这里生成。
+    </div>
+</div>
+
+<div class="card">
+    <h3 style="margin-top:0; color:#0984e3;">💻 Windows 一键客户端</h3>
+    <p style="color:#666; line-height:1.6;">生成免 Python 的 Windows 客户端，服务器地址和专属 Token 已配置好。下载解压后双击“安装并启动.cmd”即可。</p>
+    <form action="/devices/windows-package" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="text" name="name" maxlength="80" placeholder="电脑名称（例如：办公室电脑）" required>
+        <button type="submit" class="btn" style="width:100%; background:#0984e3; color:white;">生成并下载 Windows 客户端</button>
+    </form>
+    <div style="margin-top:14px; padding:14px; background:#eaf6ff; border-radius:10px; line-height:1.7; color:#075985;">
+        <b>使用方法</b><br>
+        1. 下载 ZIP 并完整解压到一个文件夹。<br>
+        2. 双击“安装并启动.cmd”，客户端会立即运行。<br>
+        3. 程序会自动加入 Windows 开机启动；需要移除时运行“卸载.cmd”。
+    </div>
+</div>
+
+<div class="card">
+    <h3 style="margin-top:0; color:var(--main);">🔑 已授权设备</h3>
+    <p style="color:#666; line-height:1.6;">设备令牌只保存哈希，不会在网页或数据库中显示。重新下载某个设备会自动轮换令牌，旧安装随即失效。</p>
+    <div style="margin-top:20px;">
+        {% for r in rows %}
+        <div style="border-bottom:1px solid #eee; padding:15px 0;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <b style="font-size:18px;">{{ r.name }}</b>
+                <button type="button" onclick="deleteItem('device', {{ r.id }})" style="color:var(--red); border:0; background:none; cursor:pointer; font-size:14px; font-weight:bold;">删除</button>
+            </div>
+            <div style="margin-top:8px; color:#888; font-size:13px;">类型：{{ r.platform }}</div>
+            {% if r.platform == 'android_magisk' %}
+            <form action="/devices/{{ r.id }}/magisk-module" method="post" style="margin-top:10px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn" style="width:100%; background:#e8e5ff; color:var(--main);">轮换令牌并重新下载 Magisk 模块</button>
+            </form>
+            {% endif %}
+            {% if r.platform == 'windows' %}
+            <form action="/devices/{{ r.id }}/windows-package" method="post" style="margin-top:8px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn" style="width:100%; background:#e3f2fd; color:#0984e3;">轮换令牌并重新下载 Windows 客户端</button>
+            </form>
+            {% endif %}
+        </div>
+        {% else %}
+        <p style="text-align:center; color:#999;">暂无设备</p>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>同步中心</title>
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <style>
+        :root { --main: #6c5ce7; --red: #ff7675; --green: #00b894; --orange: #fdcb6e; }
+        body { font-family: system-ui, -apple-system; background: #f0f2f5; margin: 0; font-size: 16px; padding-bottom: 40px; }
+        .nav { background: #333; padding: 15px; display: flex; gap: 10px; overflow-x: auto; position: sticky; top: 0; z-index: 100; }
+        .nav a { color: white; text-decoration: none; padding: 10px 18px; border-radius: 10px; font-weight: bold; font-size: 15px; white-space: nowrap; }
+        .container { max-width: 600px; margin: 20px auto; padding: 0 15px; box-sizing: border-box; }
+        .card { background: white; border-radius: 20px; padding: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }
+        input, select { width: 100%; padding: 15px; margin: 10px 0; border: 1px solid #ddd; border-radius: 12px; font-size: 16px; box-sizing: border-box; }
+        .btn { border: none; padding: 15px; border-radius: 12px; cursor: pointer; font-weight: bold; font-size: 16px; }
+        .btn-main { background: var(--main); color: white; width: 100%; }
+        .item-row { border-bottom: 1px solid #f0f0f0; padding: 15px 0; display: flex; gap: 12px; align-items: flex-start; }
+        .content-box { background: #f8f9fa; padding: 15px; border-radius: 12px; word-break: break-all; margin-top: 10px; font-size: 17px; line-height: 1.5; color: #333; flex: 1;white-space: pre-wrap; }
+        #toast { display:none; position:fixed; top:25px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.85); color:white; padding:12px 25px; border-radius:30px; z-index:999; font-weight:bold; }
+        .bulk-bar { display: flex; gap: 10px; margin-top: 20px; position: sticky; bottom: 20px; }
+        .fav-btn { cursor:pointer; font-size:22px; background:none; border:none; padding:5px; transition:transform 0.2s; }
+        .fav-btn:hover { transform:scale(1.2); }
+        .fav-btn.active { color: #fdcb6e; }
+        .fav-btn:not(.active) { color: #ddd; }
+    </style>
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
+</head>
+<body>
+    <div id="toast">已复制到剪贴板</div>
+    {% if session.user_id %}
+    <div class="nav">
+        <a href="/">🏠 首页</a><a href="/clips">📋 剪贴板</a><a href="/codes">🚨 验证码</a><a href="/favorites">⭐ 收藏</a><a href="/files">📁 文件</a><a href="/devices">⚙️ 设备</a>
+        {% if session.is_admin %}<a href="/admin/invites">👥 注册管理</a>{% endif %}
+        <form action="/logout" method="post" style="margin:0; display:inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn" style="background:var(--red); color:white; padding:10px 18px;">退出</button>
+        </form>
+    </div>
+    {% endif %}
+    <div class="container">
+        {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div style="background:#ffeaa7; padding:15px; border-radius:12px; margin-bottom:15px; color:#d63031; font-weight:bold;">{{m}}</div>{% endfor %}{% endwith %}
+        {% block content %}{% endblock %}
+    </div>
+    <script>
+        function copyText(text) {
+            const el = document.createElement('textarea'); el.value = text; document.body.appendChild(el); el.select();
+            document.execCommand('copy'); document.body.removeChild(el);
+            const t = document.getElementById('toast'); t.style.display = 'block'; setTimeout(() => t.style.display='none', 2000);
+        }
+        function submitBulk(action) {
+            if(action === 'clear_all' && !confirm('确定要清空全部吗？')) return;
+            if(action === 'delete_selected' && document.querySelectorAll('input[name="item_ids"]:checked').length === 0) { alert('请先勾选项目'); return; }
+            document.getElementById('bulkAction').value = action; document.getElementById('bulkForm').submit();
+        }
+        async function toggleFavorite(target, id, btn) {
+            try {
+                const resp = await fetch('/api/toggle_favorite', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content
+                    },
+                    body: JSON.stringify({target, id})
+                });
+                const data = await resp.json();
+                if (data.is_favorite !== undefined) {
+                    if (data.is_favorite) {
+                        btn.classList.add('active');
+                        btn.textContent = '⭐';
+                    } else {
+                        btn.classList.remove('active');
+                        btn.textContent = '☆';
+                    }
+                }
+            } catch(e) {
+                console.error(e);
+            }
+        }
+        async function deleteItem(target, id) {
+            if (!confirm('确定删除？')) return;
+            const token = document.querySelector('meta[name="csrf-token"]').content;
+            const body = new URLSearchParams({csrf_token: token});
+            const resp = await fetch(`/delete/${target}/${id}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body
+            });
+            if (resp.ok) location.reload();
+        }
+    </script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js');
+        }
+    </script>
+</body>
+</html>

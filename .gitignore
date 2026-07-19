@@ -1,0 +1,15 @@
+.env
+data/
+build/
+dist/
+*.sqlite
+*.sqlite-*
+*.db
+*.log
+*.zip
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+clients/windows/template/clipboard-sync-windows-v*.exe
+!clients/windows/template/clipboard-sync-windows-v1.2.0.exe

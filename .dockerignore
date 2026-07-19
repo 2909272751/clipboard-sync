@@ -1,0 +1,12 @@
+.git
+.github
+.env
+data
+build
+dist
+tests
+__pycache__
+*.pyc
+clients/windows/template/clipboard-sync-windows-v1.1.0.exe
+clients/windows/template/clipboard-sync-windows-v1.1.1.exe
+clients/windows/template/clipboard-sync-windows-v1.1.2.exe

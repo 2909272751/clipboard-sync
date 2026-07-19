@@ -1,0 +1,11 @@
+Clipboard Sync Windows v1.2.0
+
+1. 解压整个 ZIP，不要只单独运行压缩包里的文件。
+2. 双击“安装并启动.cmd”。
+3. 安装后会立即启动，并自动添加到当前用户的 Windows 登录启动项。
+4. 如需移除，双击“卸载.cmd”。
+
+无需安装 Python，也不需要管理员权限。
+这个下载包已经包含专属设备凭据，请不要转发给其他人。
+上传成功和收到其他设备内容时，Windows 通知中心会显示同步内容预览。
+运行日志位于：%LOCALAPPDATA%\ClipboardSync\clipboard-sync.log

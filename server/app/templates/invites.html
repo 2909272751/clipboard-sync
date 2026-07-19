@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h2 style="margin-top:0; color:var(--main);">注册管理</h2>
+    <p style="color:#666; line-height:1.6;">默认关闭开放注册。需要多人自由注册时可临时开启；平时建议关闭并使用一次性邀请。</p>
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="toggle_registration">
+        <input type="hidden" name="enabled" value="{{ '0' if public_registration else '1' }}">
+        <p><strong>开放注册：</strong>{{ '已开启' if public_registration else '已关闭' }}</p>
+        <button type="submit" class="btn btn-main">{{ '关闭开放注册' if public_registration else '开启开放注册' }}</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2 style="margin-top:0; color:var(--main);">一次性邀请</h2>
+    <p style="color:#666; line-height:1.6;">邀请链接 7 天内有效，只能成功注册一次。服务器只保存邀请码的哈希。</p>
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="create_invite">
+        <button type="submit" class="btn btn-main">生成邀请链接</button>
+    </form>
+    {% if new_invite_url %}
+    <div style="margin-top:18px; padding:15px; background:#fff3cd; border-radius:12px; word-break:break-all;">
+        <strong>请现在复制，刷新后不会再次显示：</strong><br>
+        <span id="invite-url">{{ new_invite_url }}</span>
+        <button class="btn" style="margin-top:10px;" onclick="copyText(document.getElementById('invite-url').textContent)">复制链接</button>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3 style="margin-top:0;">最近邀请</h3>
+    {% if rows %}
+        {% for row in rows %}
+        <div class="item-row">
+            <div>#{{ row.id }}</div>
+            <div style="flex:1; color:#666;">
+                {% if row.used_at %}已使用
+                {% elif row.expires_at < now %}已过期
+                {% else %}等待使用（7 天内有效）{% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p style="color:#999;">还没有邀请记录。</p>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h3 style="margin-top:0">📋 剪贴板历史</h3>
+    <form method="GET" action="/clips" style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+        <input type="search" name="q" value="{{ q }}" maxlength="200" placeholder="搜索剪贴板内容或来源设备" style="margin:0; flex:1;">
+        <button type="submit" class="btn" style="background:var(--main); color:white; white-space:nowrap;">搜索</button>
+        {% if q %}<a href="/clips" class="btn" style="background:#eee; color:#555; text-decoration:none; white-space:nowrap;">清空</a>{% endif %}
+    </form>
+    {% if q %}<p style="margin:8px 0 12px; color:#777; font-size:14px;">“{{ q }}”的搜索结果：{{ rows|length }} 条</p>{% endif %}
+    <form id="bulkForm" action="/api/bulk_delete" method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="target" value="clip">
+        <input type="hidden" name="action" id="bulkAction" value="delete_selected">
+
+        {% for r in rows %}
+        <div class="item-row">
+            <input type="checkbox" name="item_ids" value="{{r.id}}" style="width:22px; height:22px; margin-top:15px;">
+            <button class="fav-btn {% if r.is_favorite %}active{% endif %}" onclick="toggleFavorite('clip', {{r.id}}, this)" type="button">{% if r.is_favorite %}⭐{% else %}☆{% endif %}</button>
+            <div style="flex:1">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="color:#666; font-size:14px; font-weight:bold;">{{ r.device }} · {{ r.created_at }}</span>
+                    <button type="button" onclick="deleteItem('clip', {{ r.id }})" style="color:var(--red); border:0; background:none; cursor:pointer; font-size:14px;">删除</button>
+                </div>
+
+                <div class="content-box" style="cursor: pointer; white-space: pre-wrap;" onclick='copyText({{ r.content.replace("\\n", "\n")|tojson }})'>{{ r.content.replace("\\n", "\n") }}</div>
+            </div>
+        </div>
+        {% else %}
+        <p style="text-align:center; color:#999;">{% if q %}没有找到匹配记录{% else %}暂无记录{% endif %}</p>
+        {% endfor %}
+
+        {% if rows %}
+        <div class="bulk-bar">
+            <button type="button" onclick="submitBulk('delete_selected')" class="btn" style="background:var(--red); color:white; flex:1">删除选中</button>
+            <button type="button" onclick="submitBulk('clear_all')" class="btn" style="background:#d63031; color:white; flex:1">清空全部</button>
+        </div>
+        {% endif %}
+    </form>
+</div>
+{% endblock %}
