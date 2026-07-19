@@ -41,7 +41,7 @@ DB = os.environ.get("DB_PATH", "/data/db.sqlite")
 UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "/data/uploads")
 MAGISK_TEMPLATE_DIR = Path(os.environ.get("MAGISK_TEMPLATE_DIR", "/app/magisk-template"))
 WINDOWS_TEMPLATE_DIR = Path(os.environ.get("WINDOWS_TEMPLATE_DIR", "/app/windows-client"))
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 MAGISK_VERSION = "1.3.0"
 WINDOWS_VERSION = "1.3.0"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -227,7 +227,7 @@ def get_db():
     finally:
         conn.close()
 
-def find_device_by_token(token, touch=True):
+def find_device_by_token(token, touch=True, transport=None):
     if not token:
         return None
     with get_db() as conn:
@@ -239,15 +239,16 @@ def find_device_by_token(token, touch=True):
         """, (token_digest(token),)).fetchone()
         if device and touch:
             client_version = request.headers.get("X-Client-Version", "").strip()[:40]
+            transport = (transport or "http")[:24]
             if client_version:
                 conn.execute(
-                    "UPDATE devices SET last_seen_at=?, client_version=? WHERE id=?",
-                    (int(time.time()), client_version, device['id']),
+                    "UPDATE devices SET last_seen_at=?, client_version=?, last_transport=? WHERE id=?",
+                    (int(time.time()), client_version, transport, device['id']),
                 )
             else:
                 conn.execute(
-                    "UPDATE devices SET last_seen_at=? WHERE id=?",
-                    (int(time.time()), device['id']),
+                    "UPDATE devices SET last_seen_at=?, last_transport=? WHERE id=?",
+                    (int(time.time()), transport, device['id']),
                 )
             conn.commit()
         return device
@@ -270,7 +271,7 @@ def password_matches(stored, supplied):
 @socketio.on('connect')
 def socket_connect(auth):
     token = (auth or {}).get('token', '') if isinstance(auth, dict) else ''
-    device = find_device_by_token(token)
+    device = find_device_by_token(token, transport="websocket")
     if device:
         with _socket_lock:
             _socket_devices[request.sid] = device['id']
@@ -296,7 +297,7 @@ def init_db():
         c.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, question TEXT, answer TEXT, is_admin INTEGER DEFAULT 0, disabled INTEGER DEFAULT 0, last_login_at INTEGER)')
         c.execute('CREATE TABLE IF NOT EXISTS clips (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, device TEXT, content TEXT, created_at TEXT, created_ts INTEGER, is_favorite INTEGER DEFAULT 0)')
         c.execute('CREATE TABLE IF NOT EXISTS codes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, device TEXT, content TEXT, pure_code TEXT, created_at TEXT, created_ts INTEGER, is_favorite INTEGER DEFAULT 0)')
-        c.execute("CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, token TEXT, token_hash TEXT UNIQUE, platform TEXT DEFAULT 'generic', sync_mode TEXT DEFAULT 'both', last_seen_at INTEGER, last_sync_at INTEGER, client_version TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, token TEXT, token_hash TEXT UNIQUE, platform TEXT DEFAULT 'generic', sync_mode TEXT DEFAULT 'both', last_seen_at INTEGER, last_sync_at INTEGER, client_version TEXT, last_transport TEXT)")
         c.execute('''CREATE TABLE IF NOT EXISTS sync_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -355,6 +356,7 @@ def init_db():
             "ALTER TABLE devices ADD COLUMN last_seen_at INTEGER",
             "ALTER TABLE devices ADD COLUMN last_sync_at INTEGER",
             "ALTER TABLE devices ADD COLUMN client_version TEXT",
+            "ALTER TABLE devices ADD COLUMN last_transport TEXT",
             "ALTER TABLE clips ADD COLUMN created_ts INTEGER",
             "ALTER TABLE codes ADD COLUMN created_ts INTEGER",
             "ALTER TABLE files ADD COLUMN created_ts INTEGER",
@@ -866,7 +868,7 @@ def devices():
 def load_device_rows():
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id,name,platform,sync_mode,last_seen_at,last_sync_at,client_version,token_hash FROM devices WHERE user_id=?",
+            "SELECT id,name,platform,sync_mode,last_seen_at,last_sync_at,client_version,token_hash,last_transport FROM devices WHERE user_id=?",
             (session['user_id'],),
         ).fetchall()
     with _socket_lock:
@@ -875,17 +877,92 @@ def load_device_rows():
     device_rows = []
     for row in rows:
         item = dict(row)
-        item['online'] = row['id'] in socket_device_ids or (
+        socket_online = row['id'] in socket_device_ids
+        item['online'] = socket_online or (
             row['last_seen_at'] and now - row['last_seen_at'] <= 90
         )
         item['token_active'] = bool(row['token_hash'])
+        item.update(device_diagnostic(item, now, socket_online))
         device_rows.append(item)
     return device_rows
 
+def version_tuple(value):
+    numbers = re.findall(r"\d+", value or "")[:3]
+    if not numbers:
+        return ()
+    return tuple((list(map(int, numbers)) + [0, 0, 0])[:3])
+
+def device_diagnostic(device, now=None, socket_online=False):
+    now = now or int(time.time())
+    managed_versions = {
+        'android_magisk': MAGISK_VERSION,
+        'windows': WINDOWS_VERSION,
+    }
+    latest_version = managed_versions.get(device.get('platform'))
+    current_version = device.get('client_version') or ''
+    if latest_version and not current_version:
+        update_state = 'unknown'
+    elif latest_version and version_tuple(current_version) < version_tuple(latest_version):
+        update_state = 'available'
+    elif latest_version:
+        update_state = 'current'
+    else:
+        update_state = 'external'
+
+    transport = 'websocket' if socket_online else (device.get('last_transport') or '')
+    transport_labels = {
+        'websocket': '实时 WebSocket',
+        'long_poll': '低频长轮询',
+        'recovery': '断线补收',
+        'upload': 'HTTP 上传',
+        'ack': '同步确认',
+        'http': 'HTTP 接口',
+    }
+    last_seen = device.get('last_seen_at')
+    token_active = bool(device.get('token_hash'))
+    if not token_active:
+        state, label, message = 'danger', 'Token 已失效', '重新生成客户端或创建新的通用 Token。'
+    elif device.get('sync_mode') == 'paused':
+        state, label, message = 'paused', '已暂停', '设备连接正常时也不会发送或接收内容。'
+    elif socket_online:
+        state, label, message = 'healthy', '实时连接正常', 'WebSocket 已连接，剪贴板变化可以立即到达。'
+    elif not last_seen:
+        state, label, message = 'waiting', '等待首次连接', '安装或配置客户端后，它首次连接时会自动更新状态。'
+    elif now - last_seen <= 90:
+        state, label, message = 'healthy', '最近连接正常', '设备正在通过低功耗接口保持联系。'
+    elif now - last_seen <= 900:
+        state, label, message = 'recent', '最近活跃', '设备暂未实时在线，但近期成功连接过。'
+    elif now - last_seen <= 86400:
+        state, label, message = 'idle', '暂时离线', '可能处于熄屏、休眠或断网状态，恢复后会自动补收。'
+    else:
+        state, label, message = 'offline', '长时间未连接', '请检查客户端是否仍在运行、网络是否可用以及 Token 是否已轮换。'
+
+    return {
+        'diagnostic_state': state,
+        'diagnostic_label': label,
+        'diagnostic_message': message,
+        'connection_label': (
+            '最近使用 WebSocket' if transport == 'websocket' and not socket_online
+            else transport_labels.get(transport, '尚未记录')
+        ),
+        'latest_version': latest_version,
+        'update_state': update_state,
+        'needs_attention': state in {'danger', 'offline'} or update_state == 'available',
+    }
+
 def render_device_page(new_generic_device=None):
+    rows = load_device_rows()
+    diagnostics = {
+        'healthy': sum(row['diagnostic_state'] in {'healthy', 'recent'} for row in rows),
+        'attention': sum(row['needs_attention'] for row in rows),
+        'offline': sum(row['diagnostic_state'] in {'idle', 'offline'} for row in rows),
+        'waiting': sum(row['diagnostic_state'] == 'waiting' for row in rows),
+        'checked_at': int(time.time()),
+    }
     return render_template(
-        "devices.html", rows=load_device_rows(), user_id=session['user_id'],
-        new_generic_device=new_generic_device,
+        "devices.html", rows=rows, user_id=session['user_id'],
+        new_generic_device=new_generic_device, diagnostics=diagnostics,
+        magisk_version=MAGISK_VERSION, windows_version=WINDOWS_VERSION,
     )
 
 @app.route('/devices/generic-token', methods=['POST'])
@@ -1205,7 +1282,7 @@ def api_push():
     remote = client_ip()
     if rate_limited("api_push", token_digest(token) if token else remote, 180, 60):
         abort(429)
-    device = find_device_by_token(token)
+    device = find_device_by_token(token, transport="upload")
     if not device:
         return {"error":"unauthorized"}, 403
     if device['sync_mode'] not in {'both', 'send_only'}:
@@ -1286,7 +1363,7 @@ def api_push():
 @app.route('/api/latest')
 def api_latest():
     token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    device = find_device_by_token(token)
+    device = find_device_by_token(token, transport="recovery")
     if not device:
         return {"error": "unauthorized"}, 403
     if device['sync_mode'] not in {'both', 'receive_only'}:
@@ -1320,7 +1397,7 @@ def api_latest():
 @app.route('/api/ack', methods=['POST'])
 def api_ack():
     token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    device = find_device_by_token(token)
+    device = find_device_by_token(token, transport="ack")
     if not device:
         return {"error": "unauthorized"}, 403
     mark_device_synced(device['id'])
@@ -1329,7 +1406,7 @@ def api_ack():
 @app.route('/api/poll')
 def api_poll():
     token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    device = find_device_by_token(token)
+    device = find_device_by_token(token, transport="long_poll")
     if not device:
         return {"error": "unauthorized"}, 403
     try:

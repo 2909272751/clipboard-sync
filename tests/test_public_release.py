@@ -344,7 +344,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
             )
 
     def test_authenticated_pages_share_the_responsive_shell(self):
-        self.assertEqual(self.client.get("/healthz").get_json()["version"], "1.3.3")
+        self.assertEqual(self.client.get("/healthz").get_json()["version"], "1.3.4")
         for path in (
             "/", "/clips", "/codes", "/favorites", "/files", "/devices",
             "/account", "/admin/invites", "/admin/users",
@@ -354,7 +354,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 page = response.get_data(as_text=True)
                 self.assertIn('viewport-fit=cover', page)
-                self.assertIn('/static/app.css?v=1.3.3', page)
+                self.assertIn('/static/app.css?v=1.3.4', page)
                 self.assertIn('id="main-content"', page)
                 self.assertIn('class="mobile-topbar"', page)
                 self.assertNotIn('user-scalable=no', page)
@@ -370,6 +370,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
             "animation: page-enter",
             "animation: page-enter 180ms",
             "content-visibility: auto",
+            ".diagnostic-metrics",
             "overflow-wrap: anywhere",
             "min-width: 0",
         ):
@@ -380,7 +381,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
 
     def test_static_assets_are_versioned_cached_and_compressed(self):
         response = self.client.get(
-            "/static/app.css?v=1.3.3",
+            "/static/app.css?v=1.3.4",
             headers={"Accept-Encoding": "gzip"},
         )
         self.assertEqual(response.status_code, 200)
@@ -392,7 +393,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
         worker = self.client.get("/service-worker")
         self.assertEqual(worker.status_code, 200)
         self.assertIn("no-cache", worker.headers["Cache-Control"])
-        self.assertIn("clipboard-sync-static-v1.3.3", worker.get_data(as_text=True))
+        self.assertIn("clipboard-sync-static-v1.3.4", worker.get_data(as_text=True))
         worker.close()
 
         dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -430,6 +431,45 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
         )
         self.assertEqual(pushed.status_code, 200)
         self.assertEqual(pushed.get_json()["status"], "ok")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT last_transport FROM devices WHERE name=? ORDER BY id DESC LIMIT 1",
+                    ("Linux automation",),
+                ).fetchone()[0],
+                "upload",
+            )
+
+    def test_device_diagnostics_and_update_prompt_use_existing_activity(self):
+        now = int(time.time())
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            user_id = conn.execute("SELECT id FROM users WHERE username='test-user'").fetchone()[0]
+            conn.execute(
+                "INSERT INTO devices (user_id,name,token_hash,platform,sync_mode,last_seen_at,last_transport,client_version) VALUES (?,?,?,?,?,?,?,?)",
+                (user_id, "outdated-windows", hashlib.sha256(b"outdated").hexdigest(), "windows", "both", now - 120, "long_poll", "1.2.9"),
+            )
+            conn.execute(
+                "INSERT INTO devices (user_id,name,token_hash,platform,sync_mode) VALUES (?,?,?,?,?)",
+                (user_id, "waiting-magisk", hashlib.sha256(b"waiting").hexdigest(), "android_magisk", "both"),
+            )
+            conn.commit()
+
+        page = self.client.get("/devices", base_url=self.base_url).get_data(as_text=True)
+        self.assertIn("设备诊断", page)
+        self.assertIn("不会额外轮询设备", page)
+        self.assertIn("发现客户端更新", page)
+        self.assertIn("当前 v1.2.9 · 最新 v1.3.0", page)
+        self.assertIn("低频长轮询", page)
+        self.assertIn("客户端首次连接后会自动检查版本", page)
+        self.assertIn("更新到 v1.3.0", page)
+        self.assertNotIn("setInterval", (TEMPLATE_DIR / "devices.html").read_text(encoding="utf-8"))
+
+        diagnostic = self.module.device_diagnostic({
+            "platform": "windows", "client_version": "1.3", "token_hash": "x",
+            "sync_mode": "both", "last_seen_at": now, "last_transport": "recovery",
+        }, now=now)
+        self.assertEqual(diagnostic["update_state"], "current")
+        self.assertEqual(diagnostic["connection_label"], "断线补收")
 
     def test_clipboard_page_searches_content_and_device(self):
         marker = f"search-marker-{time.time_ns()}"
@@ -488,6 +528,11 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0]["args"][0]["content"], content)
         self.assertEqual(updates[0]["args"][0]["event_id"], "test-event-id")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT last_transport FROM devices WHERE token_hash=?", (hashlib.sha256(windows_token.encode()).hexdigest(),)).fetchone()[0],
+                "websocket",
+            )
         socket_client.disconnect()
 
     def test_push_event_id_is_idempotent_and_records_client_status(self):
@@ -520,11 +565,12 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
                 1,
             )
             status = conn.execute(
-                "SELECT client_version,last_seen_at,last_sync_at FROM devices WHERE id=?", (device_id,)
+                "SELECT client_version,last_seen_at,last_sync_at,last_transport FROM devices WHERE id=?", (device_id,)
             ).fetchone()
         self.assertEqual(status[0], "1.3.0")
         self.assertTrue(status[1])
         self.assertTrue(status[2])
+        self.assertEqual(status[3], "upload")
 
     def test_device_sync_modes_are_enforced(self):
         with closing(sqlite3.connect(self.db_path)) as conn:
