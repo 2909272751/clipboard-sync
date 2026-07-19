@@ -4,9 +4,9 @@
   "description": "剪贴板同步助手",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#6C5CE7",
-  "theme_color": "#5A4BD1",
-  "orientation": "portrait",
+  "background_color": "#F3F5FB",
+  "theme_color": "#17192A",
+  "orientation": "any",
   "icons": [
     {
       "src": "/static/icon-192.png",

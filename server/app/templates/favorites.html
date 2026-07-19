@@ -1,43 +1,31 @@
 {% extends "base.html" %}
+{% block title %}我的收藏{% endblock %}
 {% block content %}
-<div class="card">
-    <h3 style="margin-top:0">⭐ 我的收藏</h3>
+<header class="page-heading"><div><p class="page-kicker">Favorites</p><h1>我的收藏</h1><p class="page-description">集中保存需要反复使用的重要内容。</p></div></header>
 
-    {% if clips or codes %}
-        {% if clips %}
-        <h4 style="color:var(--main); margin:15px 0 5px;">📋 剪贴板收藏</h4>
-        {% for r in clips %}
-        <div class="item-row">
-            <button class="fav-btn active" onclick="toggleFavorite('clip', {{r.id}}, this)" type="button">⭐</button>
-            <div style="flex:1">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <span style="color:#666; font-size:14px; font-weight:bold;">{{ r.device }} · {{ r.created_at }}</span>
-                    <button type="button" onclick="deleteItem('clip', {{ r.id }})" style="color:var(--red); border:0; background:none; cursor:pointer; font-size:14px;">删除</button>
-                </div>
-                <div class="content-box" style="cursor: pointer; white-space: pre-wrap;" onclick='copyText({{ r.content.replace("\\n", "\n")|tojson }})'>{{ r.content.replace("\\n", "\n") }}</div>
-            </div>
-        </div>
-        {% endfor %}
-        {% endif %}
+{% if clips %}
+<section class="card">
+    <div class="card-header"><div><h2 class="card-title">剪贴板收藏</h2><p class="card-description no-bottom">点击内容即可复制</p></div><span class="badge">{{ clips|length }} 条</span></div>
+    <div class="record-list">
+    {% for r in clips %}<article class="record-row">
+        <button class="fav-btn active" onclick="toggleFavorite('clip', {{ r.id }}, this)" type="button" aria-label="取消收藏">★</button>
+        <div class="record-main record-main-wide"><div class="record-head"><span class="record-meta">{{ r.device }} · {{ r.created_at }}</span><button type="button" onclick="deleteItem('clip', {{ r.id }})" class="icon-button" aria-label="删除记录">×</button></div><div class="content-box copyable" tabindex="0" role="button" onclick='copyText({{ r.content.replace("\\n", "\n")|tojson }})'>{{ r.content.replace("\\n", "\n") }}</div></div>
+    </article>{% endfor %}
+    </div>
+</section>
+{% endif %}
 
-        {% if codes %}
-        <h4 style="color:var(--main); margin:15px 0 5px;">🚨 验证码收藏</h4>
-        {% for r in codes %}
-        <div class="item-row">
-            <button class="fav-btn active" onclick="toggleFavorite('code', {{r.id}}, this)" type="button" style="margin-top:8px;">⭐</button>
-            <div style="flex:1">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <b onclick="copyText('{{r.pure_code}}')" style="font-size:36px; color:var(--main); cursor:pointer; background:#f0edff; padding:8px 20px; border-radius:15px; letter-spacing:2px;">{{ r.pure_code }}</b>
-                    <button type="button" onclick="deleteItem('code', {{ r.id }})" style="color:var(--red); border:0; background:none; cursor:pointer; font-size:14px;">删除</button>
-                </div>
-                <div style="margin-top:10px; color:#999; font-size:13px; font-weight:bold;">{{ r.device }} · {{ r.created_at }}</div>
-                <div class="content-box">{{ r.content }}</div>
-            </div>
-        </div>
-        {% endfor %}
-        {% endif %}
-    {% else %}
-    <p style="text-align:center; color:#999; padding:30px 0;">暂无收藏内容<br><small>在剪贴板或验证码页面点击 ☆ 即可收藏</small></p>
-    {% endif %}
-</div>
+{% if codes %}
+<section class="card">
+    <div class="card-header"><div><h2 class="card-title">验证码收藏</h2><p class="card-description no-bottom">点击验证码即可复制</p></div><span class="badge">{{ codes|length }} 条</span></div>
+    <div class="record-list">
+    {% for r in codes %}<article class="record-row">
+        <button class="fav-btn active" onclick="toggleFavorite('code', {{ r.id }}, this)" type="button" aria-label="取消收藏">★</button>
+        <div class="record-main record-main-wide"><div class="record-head"><button type="button" onclick='copyText({{ r.pure_code|tojson }})' class="code-value">{{ r.pure_code }}</button><button type="button" onclick="deleteItem('code', {{ r.id }})" class="icon-button" aria-label="删除记录">×</button></div><div class="record-meta meta-spaced">{{ r.device }} · {{ r.created_at }}</div><div class="content-box">{{ r.content }}</div></div>
+    </article>{% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if not clips and not codes %}<section class="card"><div class="empty-state"><span class="empty-icon" aria-hidden="true">☆</span>暂无收藏内容<br><small>在剪贴板或验证码页面点击 ☆ 即可收藏</small></div></section>{% endif %}
 {% endblock %}

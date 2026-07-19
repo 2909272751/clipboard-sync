@@ -1,30 +1,45 @@
 {% extends "base.html" %}
+{% block title %}验证码记录{% endblock %}
 {% block content %}
-<div class="card">
-    <h3 style="margin-top:0; color:var(--main);">🚨 验证码记录</h3>
-    <form method="GET" action="/codes" style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
-        <input type="search" name="q" value="{{ filters.q }}" maxlength="200" placeholder="搜索内容或验证码" style="margin:0; grid-column:1 / -1;">
-        <select name="device" style="margin:0;"><option value="">全部设备</option>{% for name in devices %}<option value="{{ name }}" {% if filters.device == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>
-        <select name="per_page" style="margin:0;">{% for size in [20,50,100] %}<option value="{{ size }}" {% if pagination.per_page == size %}selected{% endif %}>每页 {{ size }} 条</option>{% endfor %}</select>
-        <input type="date" name="date_from" value="{{ filters.date_from }}" title="开始日期" style="margin:0;">
-        <input type="date" name="date_to" value="{{ filters.date_to }}" title="结束日期" style="margin:0;">
-        <button type="submit" class="btn" style="background:var(--green); color:white;">筛选</button>
-        <a href="/codes" class="btn" style="background:#eee; color:#555; text-decoration:none; text-align:center;">重置</a>
+<header class="page-heading">
+    <div><p class="page-kicker">Verification Codes</p><h1>验证码记录</h1><p class="page-description">醒目展示已识别的验证码，点击数字即可复制。</p></div>
+</header>
+
+<section class="card">
+    <form method="GET" action="/codes" class="filter-grid">
+        <label class="filter-search"><span class="field-label">搜索</span><input type="search" name="q" value="{{ filters.q }}" maxlength="200" placeholder="搜索内容或验证码"></label>
+        <label><span class="field-label">设备</span><select name="device"><option value="">全部设备</option>{% for name in devices %}<option value="{{ name }}" {% if filters.device == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+        <label><span class="field-label">开始日期</span><input type="date" name="date_from" value="{{ filters.date_from }}"></label>
+        <label><span class="field-label">结束日期</span><input type="date" name="date_to" value="{{ filters.date_to }}"></label>
+        <label><span class="field-label">每页数量</span><select name="per_page">{% for size in [20,50,100] %}<option value="{{ size }}" {% if pagination.per_page == size %}selected{% endif %}>{{ size }} 条</option>{% endfor %}</select></label>
+        <div class="filter-actions"><button type="submit" class="btn btn-accent">应用筛选</button><a href="/codes" class="btn">重置</a></div>
     </form>
-    <p style="color:#777; font-size:14px;">共 {{ pagination.total }} 条，当前第 {{ pagination.page }}/{{ pagination.pages }} 页；分页和筛选不会删除任何历史。</p>
+    <div class="stats-line"><span>共 {{ pagination.total }} 条记录</span><span>当前第 {{ pagination.page }}/{{ pagination.pages }} 页 · 所有历史持续保留</span></div>
+
     <form id="bulkForm" action="/api/bulk_delete" method="POST">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="target" value="code"><input type="hidden" name="action" id="bulkAction" value="delete_selected">
-        {% for r in rows %}<div class="item-row">
-            <input type="checkbox" name="item_ids" value="{{r.id}}" style="width:22px; height:22px; margin-top:20px;">
-            <button class="fav-btn {% if r.is_favorite %}active{% endif %}" onclick="toggleFavorite('code', {{r.id}}, this)" type="button" style="margin-top:8px;">{% if r.is_favorite %}⭐{% else %}☆{% endif %}</button>
-            <div style="flex:1"><div style="display:flex; justify-content:space-between; align-items:center;"><b onclick="copyText('{{r.pure_code}}')" style="font-size:36px; color:var(--main); cursor:pointer; background:#f0edff; padding:8px 20px; border-radius:15px; letter-spacing:2px;">{{ r.pure_code }}</b><button type="button" onclick="deleteItem('code', {{ r.id }})" style="color:var(--red); border:0; background:none; cursor:pointer; font-size:14px;">删除</button></div><div style="margin-top:10px; color:#999; font-size:13px; font-weight:bold;">{{ r.device }} · {{ r.created_at }}</div><div class="content-box">{{ r.content }}</div></div>
-        </div>{% else %}<p style="text-align:center; color:#999;">没有找到匹配记录</p>{% endfor %}
-        {% if rows %}<div class="bulk-bar"><button type="button" onclick="submitBulk('delete_selected')" class="btn" style="background:var(--red); color:white; flex:1">删除选中</button><button type="button" onclick="submitBulk('clear_all')" class="btn" style="background:#d63031; color:white; flex:1">一键清空</button></div>{% endif %}
+        <div class="record-list">
+        {% for r in rows %}
+            <article class="record-row">
+                <input class="record-select" type="checkbox" name="item_ids" value="{{ r.id }}" aria-label="选择此记录">
+                <button class="fav-btn {% if r.is_favorite %}active{% endif %}" onclick="toggleFavorite('code', {{ r.id }}, this)" type="button" aria-label="{{ '取消收藏' if r.is_favorite else '添加收藏' }}">{{ '★' if r.is_favorite else '☆' }}</button>
+                <div class="record-main">
+                    <div class="record-head"><button type="button" onclick='copyText({{ r.pure_code|tojson }})' class="code-value">{{ r.pure_code }}</button><button type="button" onclick="deleteItem('code', {{ r.id }})" class="icon-button" aria-label="删除记录">×</button></div>
+                    <div class="record-meta meta-spaced">{{ r.device }} · {{ r.created_at }}</div>
+                    <div class="content-box">{{ r.content }}</div>
+                </div>
+            </article>
+        {% else %}
+            <div class="empty-state"><span class="empty-icon" aria-hidden="true">#</span>没有找到匹配记录</div>
+        {% endfor %}
+        </div>
+        {% if rows %}<div class="bulk-bar"><button type="button" onclick="submitBulk('delete_selected')" class="btn btn-danger-soft">删除选中</button><button type="button" onclick="submitBulk('clear_all')" class="btn btn-danger">清空全部</button></div>{% endif %}
     </form>
-    {% if pagination.pages > 1 %}<div style="display:flex; gap:8px; justify-content:center; align-items:center; flex-wrap:wrap; margin-top:20px;">
-        {% if pagination.prev_url %}<a class="btn" href="{{ pagination.prev_url }}" style="background:#eee; text-decoration:none;">上一页</a>{% endif %}
-        {% for number,url in pagination.links %}<a class="btn" href="{{ url }}" style="text-decoration:none; background:{{ 'var(--green)' if number == pagination.page else '#eee' }}; color:{{ 'white' if number == pagination.page else '#333' }};">{{ number }}</a>{% endfor %}
-        {% if pagination.next_url %}<a class="btn" href="{{ pagination.next_url }}" style="background:#eee; text-decoration:none;">下一页</a>{% endif %}
-    </div>{% endif %}
-</div>
+
+    {% if pagination.pages > 1 %}<nav class="pagination" aria-label="分页">
+        {% if pagination.prev_url %}<a class="btn" href="{{ pagination.prev_url }}">上一页</a>{% endif %}
+        {% for number,url in pagination.links %}<a class="btn {% if number == pagination.page %}current{% endif %}" href="{{ url }}" {% if number == pagination.page %}aria-current="page"{% endif %}>{{ number }}</a>{% endfor %}
+        {% if pagination.next_url %}<a class="btn" href="{{ pagination.next_url }}">下一页</a>{% endif %}
+    </nav>{% endif %}
+</section>
 {% endblock %}

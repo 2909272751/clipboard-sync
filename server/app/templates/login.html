@@ -1,17 +1,23 @@
 {% extends "base.html" %}
+{% block title %}登录{% endblock %}
 {% block content %}
-<div class="card" style="max-width:400px; margin: 100px auto;">
-    <h2 style="text-align:center; color:var(--main); margin-top:0;">登 录</h2>
-    <form method="POST">
+<section class="card auth-card">
+    <div class="auth-brand">
+        <span class="brand-mark" aria-hidden="true">⇄</span>
+        <div><strong>Clipboard Sync</strong><div class="muted">安全连接你的设备</div></div>
+    </div>
+    <h1 class="auth-title">欢迎回来</h1>
+    <p class="auth-description">登录后管理同步历史、设备和文件。</p>
+    <form method="POST" class="form-stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <input type="text" name="username" placeholder="用户名" required autofocus>
-        <input type="password" name="password" placeholder="密码" required>
-        <button type="submit" class="btn btn-main">进入中心</button>
+        <label><span class="field-label">用户名</span><input type="text" name="username" autocomplete="username" placeholder="请输入用户名" required autofocus></label>
+        <label><span class="field-label">密码</span><input type="password" name="password" autocomplete="current-password" placeholder="请输入密码" required></label>
+        <button type="submit" class="btn btn-primary btn-block">进入同步中心</button>
     </form>
     {% if public_registration %}
-    <p style="text-align:center; margin-top:20px;"><a href="/register">创建新账号</a></p>
+    <p class="auth-footer">还没有账号？<a href="/register">创建新账号</a></p>
     {% else %}
-    <p style="text-align:center; margin-top:20px; font-size:13px; color:#999;">当前未开放注册，请联系管理员获取邀请链接。</p>
+    <p class="auth-footer">当前未开放注册，请联系管理员获取邀请链接。</p>
     {% endif %}
-</div>
+</section>
 {% endblock %}

@@ -30,6 +30,7 @@ The first account is the administrator. Registration is closed by default. From 
 - Each device can use bidirectional, send-only, receive-only, or paused mode without rebuilding its package.
 - Users can change their own password. Administrators can disable ordinary accounts or assign a temporary password; disabling an account preserves its devices, files, and history.
 - Clipboard and code history supports content, device, date, and page-size filters. The database retains the complete history unless the user explicitly deletes it.
+- The web interface uses a responsive sidebar/mobile drawer, adaptive cards and forms, accessible focus states, and reduced-motion-aware transitions across desktop, tablet, and phone layouts.
 
 ## Automatic HTTPS
 

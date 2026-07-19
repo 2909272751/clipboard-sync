@@ -1,36 +1,25 @@
 {% extends "base.html" %}
+{% block title %}文件管理{% endblock %}
 {% block content %}
-<div class="card">
-    <h3 style="margin-top:0">📁 文件管理</h3>
-
-    <form action="/api/upload" method="post" enctype="multipart/form-data" style="margin-bottom:20px; padding:15px; background:#f8f9fa; border-radius:12px;">
+<header class="page-heading"><div><p class="page-kicker">Files</p><h1>文件管理</h1><p class="page-description">上传常用文件，并在已登录的设备间安全下载。</p></div></header>
+<section class="card">
+    <form action="/api/upload" method="post" enctype="multipart/form-data" class="file-upload">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <input type="file" name="file" style="padding:10px; margin:5px 0;">
-        <button type="submit" class="btn btn-main" style="margin-top:10px;">📤 上传文件</button>
+        <input type="file" name="file" aria-label="选择文件" required>
+        <button type="submit" class="btn btn-primary">上传文件</button>
     </form>
 
-    {% if rows %}
-    <div style="margin-top:15px;">
-        {% for r in rows %}
-        <div style="border-bottom:1px solid #eee; padding:15px 0; display:flex; align-items:center; gap:12px;">
-            <div style="font-size:24px;">{% if r.original_name.endswith(('.jpg','.jpeg','.png','.gif','.webp','.bmp')) %}🖼️{% elif r.original_name.endswith(('.mp4','.avi','.mov','.mkv')) %}🎬{% elif r.original_name.endswith(('.mp3','.wav','.flac')) %}🎵{% elif r.original_name.endswith(('.zip','.rar','.7z','.tar','.gz')) %}🗜️{% elif r.original_name.endswith(('.doc','.docx','.pdf','.txt')) %}📄{% else %}📎{% endif %}</div>
-            <div style="flex:1; min-width:0;">
-                <div style="font-weight:bold; font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ r.original_name }}</div>
-                <div style="color:#999; font-size:12px; margin-top:3px;">{{ r.created_at }} · {% if r.file_size < 1024 %}{{ r.file_size }}B{% elif r.file_size < 1048576 %}{{ "%.1f"|format(r.file_size/1024) }}KB{% else %}{{ "%.1f"|format(r.file_size/1048576) }}MB{% endif %}</div>
+    {% if rows %}<div class="file-list">
+    {% for r in rows %}
+        <article class="file-row">
+            <div class="file-icon" aria-hidden="true">{% if r.original_name.endswith(('.jpg','.jpeg','.png','.gif','.webp','.bmp')) %}▧{% elif r.original_name.endswith(('.mp4','.avi','.mov','.mkv')) %}▶{% elif r.original_name.endswith(('.mp3','.wav','.flac')) %}♫{% elif r.original_name.endswith(('.zip','.rar','.7z','.tar','.gz')) %}▤{% elif r.original_name.endswith(('.doc','.docx','.pdf','.txt')) %}▱{% else %}⌑{% endif %}</div>
+            <div class="file-info"><div class="file-name" title="{{ r.original_name }}">{{ r.original_name }}</div><div class="file-meta">{{ r.created_at }} · {% if r.file_size < 1024 %}{{ r.file_size }} B{% elif r.file_size < 1048576 %}{{ "%.1f"|format(r.file_size/1024) }} KB{% else %}{{ "%.1f"|format(r.file_size/1048576) }} MB{% endif %}</div></div>
+            <div class="file-actions">
+                <a href="/uploads/{{ r.filename }}" class="btn btn-primary btn-sm">下载</a>
+                <form action="/api/delete_file" method="post" onsubmit="return confirm('确定删除该文件？')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="file_id" value="{{ r.id }}"><button type="submit" class="btn btn-danger-soft btn-sm">删除</button></form>
             </div>
-            <div style="display:flex; gap:8px;">
-                <a href="/uploads/{{ r.filename }}" target="_blank" class="btn" style="background:var(--main); color:white; padding:8px 16px; font-size:14px; text-decoration:none;">下载</a>
-                <form action="/api/delete_file" method="post" style="margin:0;" onsubmit="return confirm('确定删除该文件？')">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="hidden" name="file_id" value="{{ r.id }}">
-                    <button type="submit" class="btn" style="background:var(--red); color:white; padding:8px 16px; font-size:14px;">删除</button>
-                </form>
-            </div>
-        </div>
-        {% endfor %}
-    </div>
-    {% else %}
-    <p style="text-align:center; color:#999; padding:30px 0;">暂无文件<br><small>上传文件后可在此管理</small></p>
-    {% endif %}
-</div>
+        </article>
+    {% endfor %}
+    </div>{% else %}<div class="empty-state"><span class="empty-icon" aria-hidden="true">⌑</span>暂无文件<br><small>上传后可在这里统一管理</small></div>{% endif %}
+</section>
 {% endblock %}
