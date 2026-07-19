@@ -2,7 +2,7 @@
 
 SKIPUNZIP=0
 
-ui_print "- Clipboard Sync Uploader v1.2.0"
+ui_print "- Clipboard Sync Uploader v1.3.0"
 if grep -q '^DEVICE_TOKEN=.\+' "$MODPATH/config.conf" 2>/dev/null; then
   ui_print "- This package contains a personalized server configuration"
   ui_print "- Reboot after installation; no manual token entry is required"

@@ -22,6 +22,15 @@ No APK or Python is required on client devices. Windows starts automatically aft
 
 The first account is the administrator. Registration is closed by default. From **Registration management**, the administrator can either temporarily enable public registration or generate a one-time invitation link that expires after seven days.
 
+## Reliability and management
+
+- Windows and Magisk clients keep the latest unsent clipboard item on disk. A temporary network outage or client restart does not lose it; a newer local copy replaces the older pending item.
+- Windows records its receive cursor and automatically fetches the latest missed item after sleep, network recovery, or a realtime reconnect.
+- The **Devices** page shows online state, client version, last activity, last successful sync, and whether the token is active.
+- Each device can use bidirectional, send-only, receive-only, or paused mode without rebuilding its package.
+- Users can change their own password. Administrators can disable ordinary accounts or assign a temporary password; disabling an account preserves its devices, files, and history.
+- Clipboard and code history supports content, device, date, and page-size filters. The database retains the complete history unless the user explicitly deletes it.
+
 ## Automatic HTTPS
 
 Point a domain's A/AAAA record to the server, allow ports 80 and 443, then run:

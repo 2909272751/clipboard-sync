@@ -13,6 +13,7 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -21,15 +22,14 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 
 public final class Main {
+    private static final String CLIENT_VERSION = "1.3.0";
     private final Context context;
     private final ClipboardManager clipboard;
     private final PowerManager power;
@@ -38,7 +38,11 @@ public final class Main {
     private final ExecutorService uploads = Executors.newSingleThreadExecutor();
     private final ExecutorService polling = Executors.newSingleThreadExecutor();
     private final Object clipboardStateLock = new Object();
-    private final Set<String> pendingUploadHashes = new HashSet<>();
+    private final Object pendingLock = new Object();
+    private final File pendingFile;
+    private String pendingText = "";
+    private String pendingDigest = "";
+    private String pendingEventId = "";
     private volatile String lastUploadedHash = "";
     private volatile String lastRemoteHash = "";
     private volatile long revision = 0;
@@ -48,6 +52,7 @@ public final class Main {
         this.config = config;
         this.clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
         this.power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        this.pendingFile = new File(config.stateDirectory, "pending-upload.json");
     }
 
     public static void main(String[] args) throws Exception {
@@ -68,6 +73,7 @@ public final class Main {
     }
 
     private void start() {
+        loadPending();
         String initial = readClipboard();
         if (!initial.isEmpty()) {
             lastUploadedHash = sha256(initial);
@@ -77,15 +83,13 @@ public final class Main {
             if (text.isEmpty()) return;
             String digest = sha256(text);
             synchronized (clipboardStateLock) {
-                if (digest.equals(lastRemoteHash)
-                        || digest.equals(lastUploadedHash)
-                        || pendingUploadHashes.contains(digest)) {
+                if (digest.equals(lastRemoteHash) || digest.equals(lastUploadedHash)) {
                     return;
                 }
-                pendingUploadHashes.add(digest);
             }
-            uploads.execute(() -> upload(text, digest));
+            queueLatestUpload(text, digest);
         });
+        uploads.execute(this::uploadLoop);
         polling.execute(this::bootstrapAndPoll);
         log("bridge started for " + config.deviceName);
     }
@@ -102,33 +106,122 @@ public final class Main {
         }
     }
 
-    private void upload(String text, String digest) {
-        try {
-            JSONObject body = new JSONObject();
-            body.put("content", text);
-            body.put("event_id", UUID.randomUUID().toString());
-            JSONObject response = request("POST", "/api/push", body.toString(), 10000);
-            String status = response == null ? "" : response.optString("status", "");
-            if ("ok".equals(status)) {
-                synchronized (clipboardStateLock) {
-                    lastUploadedHash = digest;
+    private void loadPending() {
+        if (!pendingFile.isFile()) return;
+        try (FileInputStream input = new FileInputStream(pendingFile)) {
+            JSONObject saved = new JSONObject(readAll(input));
+            String text = saved.optString("content", "");
+            String eventId = saved.optString("event_id", "");
+            if (!text.isEmpty() && !eventId.isEmpty()) {
+                synchronized (pendingLock) {
+                    pendingText = text;
+                    pendingDigest = sha256(text);
+                    pendingEventId = eventId;
                 }
-                log("uploaded clipboard length=" + text.length());
-                showToast("已上传：" + toastPreview(text));
-            } else if ("ignored".equals(status)) {
-                synchronized (clipboardStateLock) {
-                    lastUploadedHash = digest;
-                }
-                log("upload ignored by server: " + response.optString("reason", "duplicate"));
-            } else {
-                log("upload returned status=" + status);
+                log("restored pending clipboard upload");
             }
         } catch (Throwable error) {
-            log("upload failed: " + error);
-        } finally {
-            synchronized (clipboardStateLock) {
-                pendingUploadHashes.remove(digest);
+            log("unable to restore pending upload: " + error);
+        }
+    }
+
+    private void persistPendingLocked() {
+        File temporary = new File(pendingFile.getParentFile(), pendingFile.getName() + ".tmp");
+        try {
+            JSONObject saved = new JSONObject();
+            if (!pendingEventId.isEmpty()) {
+                saved.put("content", pendingText);
+                saved.put("event_id", pendingEventId);
             }
+            byte[] bytes = saved.toString().getBytes(StandardCharsets.UTF_8);
+            try (FileOutputStream output = new FileOutputStream(temporary)) {
+                output.write(bytes);
+                output.getFD().sync();
+            }
+            if (pendingFile.exists() && !pendingFile.delete()) {
+                throw new IllegalStateException("unable to replace pending file");
+            }
+            if (!temporary.renameTo(pendingFile)) {
+                throw new IllegalStateException("unable to activate pending file");
+            }
+        } catch (Throwable error) {
+            log("unable to persist pending upload: " + error);
+            temporary.delete();
+        }
+    }
+
+    private void queueLatestUpload(String text, String digest) {
+        synchronized (pendingLock) {
+            if (digest.equals(pendingDigest)) return;
+            pendingText = text;
+            pendingDigest = digest;
+            pendingEventId = UUID.randomUUID().toString();
+            persistPendingLocked();
+            pendingLock.notifyAll();
+        }
+    }
+
+    private void uploadLoop() {
+        int retrySeconds = 2;
+        while (true) {
+            String text;
+            String digest;
+            String eventId;
+            synchronized (pendingLock) {
+                while (pendingEventId.isEmpty()) {
+                    try {
+                        pendingLock.wait();
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+                text = pendingText;
+                digest = pendingDigest;
+                eventId = pendingEventId;
+            }
+            try {
+                JSONObject body = new JSONObject();
+                body.put("content", text);
+                body.put("event_id", eventId);
+                JSONObject response = request("POST", "/api/push", body.toString(), 10000);
+                String status = response == null ? "" : response.optString("status", "");
+                if ("ok".equals(status) || "ignored".equals(status)) {
+                    synchronized (clipboardStateLock) {
+                        lastUploadedHash = digest;
+                    }
+                    synchronized (pendingLock) {
+                        if (eventId.equals(pendingEventId)) {
+                            pendingText = "";
+                            pendingDigest = "";
+                            pendingEventId = "";
+                            persistPendingLocked();
+                        }
+                    }
+                    if ("ok".equals(status)) {
+                        log("uploaded clipboard length=" + text.length());
+                        showToast("已上传：" + toastPreview(text));
+                    } else {
+                        log("upload ignored by server: " + response.optString("reason", "duplicate"));
+                    }
+                    retrySeconds = 2;
+                    continue;
+                }
+                log("upload returned status=" + status);
+            } catch (Throwable error) {
+                log("upload failed; latest item retained: " + error);
+            }
+            synchronized (pendingLock) {
+                if (eventId.equals(pendingEventId)) {
+                    try {
+                        pendingLock.wait(retrySeconds * 1000L);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            }
+            retrySeconds = Math.min(retrySeconds * 2, 60);
         }
     }
 
@@ -137,8 +230,8 @@ public final class Main {
             JSONObject latest = request("GET", "/api/latest", null, 10000);
             if (latest != null && "ok".equals(latest.optString("status"))) {
                 applyRemote(latest);
-                revision = latest.optLong("revision", revision);
             }
+            if (latest != null) revision = Math.max(revision, latest.optLong("revision", revision));
         } catch (Throwable error) {
             log("initial sync failed: " + error);
         }
@@ -154,7 +247,10 @@ public final class Main {
                         "GET", "/api/poll?after=" + revision + "&timeout=25", null, 35000);
                 if (result != null && "ok".equals(result.optString("status"))) {
                     applyRemote(result);
-                    revision = result.optLong("revision", revision);
+                }
+                if (result != null) revision = Math.max(revision, result.optLong("revision", revision));
+                if (result != null && "disabled".equals(result.optString("status"))) {
+                    Thread.sleep(15000);
                 }
                 retrySeconds = 2;
             } catch (Throwable error) {
@@ -178,10 +274,12 @@ public final class Main {
         String digest = sha256(text);
         synchronized (clipboardStateLock) {
             if (digest.equals(lastRemoteHash)) return;
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("Clipboard Sync", text));
+        synchronized (clipboardStateLock) {
             lastRemoteHash = digest;
             lastUploadedHash = digest;
         }
-        clipboard.setPrimaryClip(ClipData.newPlainText("Clipboard Sync", text));
         String device = data.optString("device", "其他设备").trim();
         if (device.isEmpty() || "null".equalsIgnoreCase(device) || "unknown".equalsIgnoreCase(device)) {
             device = "其他设备";
@@ -209,6 +307,7 @@ public final class Main {
         connection.setConnectTimeout(Math.min(timeoutMs, 10000));
         connection.setReadTimeout(timeoutMs);
         connection.setRequestProperty("Authorization", "Bearer " + config.deviceToken);
+        connection.setRequestProperty("X-Client-Version", CLIENT_VERSION);
         connection.setRequestProperty("Accept", "application/json");
         if (jsonBody != null) {
             byte[] body = jsonBody.getBytes(StandardCharsets.UTF_8);
@@ -262,12 +361,14 @@ public final class Main {
         final String deviceToken;
         final String deviceName;
         final boolean showToast;
+        final File stateDirectory;
 
-        private Config(String serverUrl, String deviceToken, String deviceName, boolean showToast) {
+        private Config(String serverUrl, String deviceToken, String deviceName, boolean showToast, File stateDirectory) {
             this.serverUrl = serverUrl.replaceAll("/+$", "");
             this.deviceToken = deviceToken;
             this.deviceName = deviceName;
             this.showToast = showToast;
+            this.stateDirectory = stateDirectory;
         }
 
         static Config read(File file) throws Exception {
@@ -297,7 +398,7 @@ public final class Main {
             if (server.isEmpty() || token.isEmpty()) {
                 throw new IllegalArgumentException("SERVER_URL or DEVICE_TOKEN is empty");
             }
-            return new Config(server, token, name, toast);
+            return new Config(server, token, name, toast, file.getParentFile());
         }
     }
 }
