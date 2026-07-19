@@ -1,7 +1,7 @@
 services:
   clipsync:
     build: .
-    image: clipboard-sync:1.3.0
+    image: clipboard-sync:1.3.1
     restart: unless-stopped
     ports:
       - "${BIND_ADDRESS:-0.0.0.0}:${PORT:-5000}:5000"

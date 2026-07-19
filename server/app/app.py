@@ -40,6 +40,7 @@ DB = os.environ.get("DB_PATH", "/data/db.sqlite")
 UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "/data/uploads")
 MAGISK_TEMPLATE_DIR = Path(os.environ.get("MAGISK_TEMPLATE_DIR", "/app/magisk-template"))
 WINDOWS_TEMPLATE_DIR = Path(os.environ.get("WINDOWS_TEMPLATE_DIR", "/app/windows-client"))
+APP_VERSION = "1.3.1"
 MAGISK_VERSION = "1.3.0"
 WINDOWS_VERSION = "1.3.0"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -422,7 +423,7 @@ def public_registration_enabled():
 def healthz():
     with get_db() as conn:
         conn.execute("SELECT 1").fetchone()
-    return {"status": "ok", "version": MAGISK_VERSION}
+    return {"status": "ok", "version": APP_VERSION}
 
 @app.route('/setup', methods=['GET', 'POST'])
 def setup():

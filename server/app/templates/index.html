@@ -1,13 +1,20 @@
 {% extends "base.html" %}
+{% block title %}首页{% endblock %}
 {% block content %}
-<div class="card" style="text-align:center; padding:50px 20px;">
-    <h2 style="color:var(--main); margin-top:0;">你好, {{ session.username }}!</h2>
-    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:15px; margin-top:30px;">
-        <a href="/clips" class="btn btn-main" style="padding:30px 0; text-decoration:none;">📋 剪贴板</a>
-        <a href="/codes" class="btn btn-main" style="padding:30px 0; background:var(--green); text-decoration:none;">🚨 验证码</a>
-        <a href="/favorites" class="btn btn-main" style="padding:30px 0; background:#fdcb6e; color:#333; text-decoration:none;">⭐ 收藏</a>
-        <a href="/files" class="btn btn-main" style="padding:30px 0; background:#a29bfe; text-decoration:none;">📁 文件</a>
-    </div>
-    <p style="margin-top:30px;"><a href="/devices" style="color:#999; text-decoration:none; font-size:14px;">⚙️ 设备管理中心</a></p>
-</div>
+<section class="card hero-card">
+    <p class="page-kicker hero-kicker">Clipboard Sync</p>
+    <h1>你好，{{ session.username }}</h1>
+    <p>你的剪贴板、验证码、文件和设备都在这里。选择一个入口开始使用。</p>
+</section>
+
+<section class="quick-grid" aria-label="快捷入口">
+    <a href="/clips" class="quick-link"><span class="quick-icon" aria-hidden="true">▣</span><div><span class="quick-title">剪贴板</span><span class="quick-copy">查看和搜索同步历史</span></div></a>
+    <a href="/codes" class="quick-link"><span class="quick-icon" aria-hidden="true">#</span><div><span class="quick-title">验证码</span><span class="quick-copy">快速复制验证码</span></div></a>
+    <a href="/favorites" class="quick-link"><span class="quick-icon" aria-hidden="true">☆</span><div><span class="quick-title">收藏</span><span class="quick-copy">集中管理重要内容</span></div></a>
+    <a href="/files" class="quick-link"><span class="quick-icon" aria-hidden="true">⌑</span><div><span class="quick-title">文件</span><span class="quick-copy">上传和下载常用文件</span></div></a>
+</section>
+
+<section class="card section-top">
+    <div class="card-header"><div><h2 class="card-title">设备连接</h2><p class="card-description no-bottom">生成已经写入当前服务器地址和专属令牌的客户端。</p></div><a class="btn btn-soft" href="/devices">管理设备</a></div>
+</section>
 {% endblock %}

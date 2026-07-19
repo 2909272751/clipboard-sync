@@ -1,82 +1,71 @@
 {% extends "base.html" %}
+{% block title %}设备管理{% endblock %}
 {% block content %}
-<div class="card">
-    <h3 style="margin-top:0; color:var(--main);">⚙️ 设备管理</h3>
-    <p style="color:#666; line-height:1.6;">为手机生成一个已经写入服务器地址和专属 Token 的 Magisk 模块。下载后直接在 Magisk 中刷入并重启即可，不需要再编辑配置。</p>
-    <form action="/devices/magisk-module" method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <input type="text" name="name" maxlength="80" placeholder="手机名称（例如：小米9、朋友的手机）" required>
-        <button type="submit" class="btn btn-main">生成并下载 Magisk 模块</button>
-    </form>
-    <div style="margin-top:14px; padding:14px; background:#f4f2ff; border-radius:10px; line-height:1.7; color:#4c3fa3;">
-        <b>使用方法</b><br>
-        1. 下载 ZIP 后不要解压。<br>
-        2. 打开 Magisk → 模块 → 从本地安装，选择下载的 ZIP。<br>
-        3. 安装完成后重启手机，模块会自动使用内置配置连接服务器。
-    </div>
-    <div style="margin-top:12px; padding:12px; background:#fff4d6; border-radius:10px; color:#8a6200; font-size:14px; line-height:1.5;">
-        下载的 ZIP 包含该设备的专属凭据，请不要转发给其他人。需要给朋友使用时，让朋友登录自己的账号后在这里生成。
-    </div>
-</div>
+<header class="page-heading">
+    <div><p class="page-kicker">Devices</p><h1>设备管理</h1><p class="page-description">生成已写入当前访问地址和专属令牌的客户端，并管理每台设备的同步方向。</p></div>
+</header>
 
-<div class="card">
-    <h3 style="margin-top:0; color:#0984e3;">💻 Windows 一键客户端</h3>
-    <p style="color:#666; line-height:1.6;">生成免 Python 的 Windows 客户端，服务器地址和专属 Token 已配置好。下载解压后双击“安装并启动.cmd”即可。</p>
-    <form action="/devices/windows-package" method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <input type="text" name="name" maxlength="80" placeholder="电脑名称（例如：办公室电脑）" required>
-        <button type="submit" class="btn" style="width:100%; background:#0984e3; color:white;">生成并下载 Windows 客户端</button>
-    </form>
-    <div style="margin-top:14px; padding:14px; background:#eaf6ff; border-radius:10px; line-height:1.7; color:#075985;">
-        <b>使用方法</b><br>
-        1. 下载 ZIP 并完整解压到一个文件夹。<br>
-        2. 双击“安装并启动.cmd”，客户端会立即运行。<br>
-        3. 程序会自动加入 Windows 开机启动；需要移除时运行“卸载.cmd”。
-    </div>
-</div>
+<div class="page-grid">
+    <section class="card span-6 install-card">
+        <div class="install-icon" aria-hidden="true">◆</div>
+        <h2 class="card-title">Magisk 手机模块</h2>
+        <p class="card-description">不需要安装 APK。生成后直接在 Magisk 中刷入并重启。</p>
+        <form action="/devices/magisk-module" method="post" class="form-stack">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label><span class="field-label">手机名称</span><input type="text" name="name" maxlength="80" placeholder="例如：小米手机、朋友的手机" required></label>
+            <button type="submit" class="btn btn-primary btn-block">生成并下载 Magisk 模块</button>
+        </form>
+        <ol class="steps"><li>下载 ZIP 后不要解压</li><li>Magisk → 模块 → 从本地安装</li><li>选择 ZIP，安装完成后重启手机</li></ol>
+        <div class="notice margin-top">下载包包含该设备的专属凭据，请勿转发。</div>
+    </section>
 
-<div class="card">
-    <h3 style="margin-top:0; color:var(--main);">🔑 已授权设备</h3>
-    <p style="color:#666; line-height:1.6;">设备令牌只保存哈希，不会在网页或数据库中显示。重新下载某个设备会自动轮换令牌，旧安装随即失效。</p>
-    <div style="margin-top:20px;">
+    <section class="card span-6 install-card windows">
+        <div class="install-icon" aria-hidden="true">▦</div>
+        <h2 class="card-title">Windows 一键客户端</h2>
+        <p class="card-description">独立 EXE 已包含运行环境，不要求安装 Python 或使用管理员权限。</p>
+        <form action="/devices/windows-package" method="post" class="form-stack">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label><span class="field-label">电脑名称</span><input type="text" name="name" maxlength="80" placeholder="例如：办公室电脑" required></label>
+            <button type="submit" class="btn btn-info btn-block">生成并下载 Windows 客户端</button>
+        </form>
+        <ol class="steps"><li>完整解压下载的 ZIP</li><li>双击“安装并启动.cmd”</li><li>客户端立即运行并自动加入登录启动项</li></ol>
+    </section>
+
+    <section class="card span-12">
+        <div class="card-header"><div><h2 class="card-title">已授权设备</h2><p class="card-description no-bottom">重新下载会轮换令牌，旧安装随即失效。令牌在数据库中仅保存哈希。</p></div><span class="badge">{{ rows|length }} 台</span></div>
+        <div class="device-grid">
         {% for r in rows %}
-        <div style="border-bottom:1px solid #eee; padding:15px 0;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <b style="font-size:18px;">{{ r.name }}</b>
-                <button type="button" onclick="deleteItem('device', {{ r.id }})" style="color:var(--red); border:0; background:none; cursor:pointer; font-size:14px; font-weight:bold;">删除</button>
-            </div>
-            <div style="margin-top:8px; color:#777; font-size:13px; line-height:1.7;">
-                类型：{{ r.platform }} · <b style="color:{{ '#00b894' if r.online else '#999' }};">{{ '在线' if r.online else '离线' }}</b><br>
-                客户端：{{ r.client_version or '旧版本/未知' }} · 令牌：{{ '有效' if r.token_active else '失效' }}<br>
-                最后在线：{{ format_timestamp(r.last_seen_at) }}<br>
-                最后同步：{{ format_timestamp(r.last_sync_at) }}
-            </div>
-            <form action="/devices/{{ r.id }}/sync-mode" method="post" style="display:flex; gap:8px; align-items:center; margin-top:10px;">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <select name="sync_mode" style="margin:0; flex:1;">
-                    <option value="both" {% if r.sync_mode == 'both' %}selected{% endif %}>双向同步</option>
-                    <option value="send_only" {% if r.sync_mode == 'send_only' %}selected{% endif %}>仅发送</option>
-                    <option value="receive_only" {% if r.sync_mode == 'receive_only' %}selected{% endif %}>仅接收</option>
-                    <option value="paused" {% if r.sync_mode == 'paused' %}selected{% endif %}>暂停同步</option>
-                </select>
-                <button type="submit" class="btn" style="background:#636e72; color:white; white-space:nowrap;">保存模式</button>
-            </form>
-            {% if r.platform == 'android_magisk' %}
-            <form action="/devices/{{ r.id }}/magisk-module" method="post" style="margin-top:10px;">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <button type="submit" class="btn" style="width:100%; background:#e8e5ff; color:var(--main);">轮换令牌并重新下载 Magisk 模块</button>
-            </form>
-            {% endif %}
-            {% if r.platform == 'windows' %}
-            <form action="/devices/{{ r.id }}/windows-package" method="post" style="margin-top:8px;">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <button type="submit" class="btn" style="width:100%; background:#e3f2fd; color:#0984e3;">轮换令牌并重新下载 Windows 客户端</button>
-            </form>
-            {% endif %}
-        </div>
+            <article class="device-card">
+                <div class="device-card-head">
+                    <div><h3 class="device-name">{{ r.name }}</h3><span class="badge badge-spaced {% if r.online %}badge-online{% endif %}">{{ '在线' if r.online else '离线' }}</span></div>
+                    <button type="button" onclick="deleteItem('device', {{ r.id }})" class="icon-button" aria-label="删除设备">×</button>
+                </div>
+                <div class="device-meta">
+                    <div class="meta-item"><span>类型</span>{{ r.platform }}</div>
+                    <div class="meta-item"><span>客户端</span>{{ r.client_version or '旧版本/未知' }}</div>
+                    <div class="meta-item"><span>最后在线</span>{{ format_timestamp(r.last_seen_at) }}</div>
+                    <div class="meta-item"><span>最后同步</span>{{ format_timestamp(r.last_sync_at) }}</div>
+                    <div class="meta-item"><span>令牌</span>{{ '有效' if r.token_active else '失效' }}</div>
+                </div>
+                <div class="device-actions">
+                    <form action="/devices/{{ r.id }}/sync-mode" method="post" class="inline-form responsive">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <select name="sync_mode" aria-label="同步模式">
+                            <option value="both" {% if r.sync_mode == 'both' %}selected{% endif %}>双向同步</option>
+                            <option value="send_only" {% if r.sync_mode == 'send_only' %}selected{% endif %}>仅发送</option>
+                            <option value="receive_only" {% if r.sync_mode == 'receive_only' %}selected{% endif %}>仅接收</option>
+                            <option value="paused" {% if r.sync_mode == 'paused' %}selected{% endif %}>暂停同步</option>
+                        </select>
+                        <button type="submit" class="btn btn-soft">保存模式</button>
+                    </form>
+                    {% if r.platform == 'android_magisk' %}<form action="/devices/{{ r.id }}/magisk-module" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-primary btn-block">轮换令牌并重新下载 Magisk 模块</button></form>{% endif %}
+                    {% if r.platform == 'windows' %}<form action="/devices/{{ r.id }}/windows-package" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-info btn-block">轮换令牌并重新下载 Windows 客户端</button></form>{% endif %}
+                </div>
+            </article>
         {% else %}
-        <p style="text-align:center; color:#999;">暂无设备</p>
+            <div class="empty-state full-grid-row"><span class="empty-icon" aria-hidden="true">◫</span>暂无设备</div>
         {% endfor %}
-    </div>
+        </div>
+    </section>
 </div>
 {% endblock %}

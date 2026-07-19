@@ -1,34 +1,19 @@
 {% extends "base.html" %}
+{% block title %}用户管理{% endblock %}
 {% block content %}
-<div class="card">
-    <h2 style="margin-top:0; color:var(--main);">用户管理</h2>
-    <p style="color:#666; line-height:1.6;">可停用普通用户或为其设置临时密码。停用不会删除该用户的历史、文件和设备。</p>
+<header class="page-heading"><div><p class="page-kicker">Users</p><h1>用户管理</h1><p class="page-description">停用普通用户或设置临时密码。停用不会删除历史、文件和设备。</p></div></header>
+<section class="card">
+    <div class="user-grid">
     {% for user in rows %}
-    <div style="border-bottom:1px solid #eee; padding:18px 0;">
-        <div style="display:flex; justify-content:space-between; gap:10px; align-items:center;">
-            <div>
-                <b style="font-size:18px;">{{ user.username }}</b>
-                {% if user.is_admin %}<span style="color:var(--main);"> · 管理员</span>{% endif %}
+        <article class="user-card">
+            <div class="user-card-head"><div><h2 class="user-name-large">{{ user.username }}</h2>{% if user.is_admin %}<span class="badge badge-spaced">管理员</span>{% endif %}</div><span class="badge {{ 'badge-danger' if user.disabled else 'badge-success' }}">{{ '已停用' if user.disabled else '正常' }}</span></div>
+            <div class="user-meta"><div class="meta-item"><span>设备</span>{{ user.device_count }} 台</div><div class="meta-item"><span>剪贴板</span>{{ user.clip_count }} 条</div><div class="meta-item"><span>最后登录</span>{{ format_timestamp(user.last_login_at) }}</div></div>
+            <div class="user-actions">
+                {% if not user.is_admin %}<form action="/admin/users/{{ user.id }}/action" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="toggle_disabled"><button type="submit" class="btn {{ 'btn-accent' if user.disabled else 'btn-danger-soft' }} btn-block">{{ '启用账号' if user.disabled else '停用账号' }}</button></form>{% endif %}
+                <form action="/admin/users/{{ user.id }}/action" method="post" class="inline-form responsive"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="reset_password"><input type="password" name="new_password" minlength="10" autocomplete="new-password" placeholder="设置临时密码（至少 10 位）" aria-label="临时密码" required><button type="submit" class="btn btn-info">重置密码</button></form>
             </div>
-            <span style="color:{{ '#d63031' if user.disabled else '#00b894' }}; font-weight:bold;">{{ '已停用' if user.disabled else '正常' }}</span>
-        </div>
-        <div style="color:#777; font-size:13px; margin-top:8px; line-height:1.6;">
-            设备 {{ user.device_count }} 台 · 剪贴板 {{ user.clip_count }} 条 · 最后登录 {{ format_timestamp(user.last_login_at) }}
-        </div>
-        {% if not user.is_admin %}
-        <form action="/admin/users/{{ user.id }}/action" method="post" style="margin-top:12px;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="action" value="toggle_disabled">
-            <button type="submit" class="btn" style="width:100%; background:{{ '#00b894' if user.disabled else '#ff7675' }}; color:white;">{{ '启用账号' if user.disabled else '停用账号' }}</button>
-        </form>
-        {% endif %}
-        <form action="/admin/users/{{ user.id }}/action" method="post" style="display:flex; gap:8px; margin-top:8px;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="action" value="reset_password">
-            <input type="password" name="new_password" minlength="10" placeholder="设置临时密码（至少 10 位）" required style="margin:0; flex:1;">
-            <button type="submit" class="btn" style="background:#0984e3; color:white; white-space:nowrap;">重置密码</button>
-        </form>
+        </article>
+    {% else %}<div class="empty-state full-grid-row">暂无用户</div>{% endfor %}
     </div>
-    {% endfor %}
-</div>
+</section>
 {% endblock %}

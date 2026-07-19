@@ -19,6 +19,8 @@ MAGISK_TEMPLATE = REPO_ROOT / "clients" / "magisk"
 WINDOWS_TEMPLATE = REPO_ROOT / "clients" / "windows"
 ANDROID_BRIDGE_SOURCE = REPO_ROOT / "android-bridge" / "src" / "com" / "clipsync" / "bridge" / "Main.java"
 WINDOWS_CLIENT_SOURCE = WINDOWS_TEMPLATE / "clipboard_sync_windows.pyw"
+APP_CSS = REPO_ROOT / "server" / "app" / "static" / "app.css"
+TEMPLATE_DIR = REPO_ROOT / "server" / "app" / "templates"
 
 
 class PersonalizedMagiskModuleTests(unittest.TestCase):
@@ -338,6 +340,39 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
             self.assertEqual(
                 self.module.get_public_base_url(), "http://192.0.2.10:8088"
             )
+
+    def test_authenticated_pages_share_the_responsive_shell(self):
+        self.assertEqual(self.client.get("/healthz").get_json()["version"], "1.3.1")
+        for path in (
+            "/", "/clips", "/codes", "/favorites", "/files", "/devices",
+            "/account", "/admin/invites", "/admin/users",
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path, base_url=self.base_url)
+                self.assertEqual(response.status_code, 200)
+                page = response.get_data(as_text=True)
+                self.assertIn('viewport-fit=cover', page)
+                self.assertIn('/static/app.css', page)
+                self.assertIn('id="main-content"', page)
+                self.assertIn('class="mobile-topbar"', page)
+                self.assertNotIn('user-scalable=no', page)
+
+    def test_design_system_covers_viewports_motion_and_long_content(self):
+        css = APP_CSS.read_text(encoding="utf-8")
+        for marker in (
+            "@media (max-width: 1180px)",
+            "@media (max-width: 920px)",
+            "@media (max-width: 700px)",
+            "@media (max-width: 480px)",
+            "@media (prefers-reduced-motion: reduce)",
+            "@view-transition",
+            "animation: page-enter",
+            "overflow-wrap: anywhere",
+            "min-width: 0",
+        ):
+            self.assertIn(marker, css)
+        for template in TEMPLATE_DIR.glob("*.html"):
+            self.assertNotIn('style=', template.read_text(encoding="utf-8"), template.name)
 
     def test_clipboard_page_searches_content_and_device(self):
         marker = f"search-marker-{time.time_ns()}"

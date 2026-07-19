@@ -1,13 +1,15 @@
 {% extends "base.html" %}
+{% block title %}初始化{% endblock %}
 {% block content %}
-<div class="card" style="max-width:420px; margin:70px auto;">
-    <h2 style="text-align:center; color:var(--main); margin-top:0;">初始化 Clipboard Sync</h2>
-    <p style="color:#666; line-height:1.6;">这是全新服务器的唯一初始化入口。创建首个管理员后，此页面会自动关闭。</p>
-    <form method="POST">
+<section class="card auth-card">
+    <div class="auth-brand"><span class="brand-mark" aria-hidden="true">⇄</span><strong>Clipboard Sync</strong></div>
+    <h1 class="auth-title">初始化服务器</h1>
+    <p class="auth-description">创建首个管理员账号。完成后，此初始化入口会自动关闭。</p>
+    <form method="POST" class="form-stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <input type="text" name="username" minlength="3" maxlength="40" pattern="[A-Za-z0-9_.-]+" placeholder="管理员用户名" required autofocus>
-        <input type="password" name="password" minlength="10" placeholder="管理员密码（至少 10 位）" required>
-        <button type="submit" class="btn btn-main">创建管理员</button>
+        <label><span class="field-label">管理员用户名</span><input type="text" name="username" minlength="3" maxlength="40" pattern="[A-Za-z0-9_.-]+" autocomplete="username" placeholder="请输入管理员用户名" required autofocus></label>
+        <label><span class="field-label">管理员密码</span><input type="password" name="password" minlength="10" autocomplete="new-password" placeholder="至少 10 位" required></label>
+        <button type="submit" class="btn btn-primary btn-block">创建管理员</button>
     </form>
-</div>
+</section>
 {% endblock %}
