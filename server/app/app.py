@@ -1,4 +1,4 @@
-import os, sqlite3, datetime, secrets, re, mimetypes
+import os, sqlite3, datetime, secrets, re, mimetypes, gzip
 import io
 import json
 import time
@@ -21,6 +21,7 @@ if len(secret_key) < 32 or secret_key == "replace-with-a-random-64-character-val
 app.secret_key = secret_key
 app.config.update(
     MAX_CONTENT_LENGTH=int(os.environ.get("MAX_UPLOAD_MB", "25")) * 1024 * 1024,
+    SEND_FILE_MAX_AGE_DEFAULT=31536000,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "0") == "1",
@@ -40,7 +41,7 @@ DB = os.environ.get("DB_PATH", "/data/db.sqlite")
 UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "/data/uploads")
 MAGISK_TEMPLATE_DIR = Path(os.environ.get("MAGISK_TEMPLATE_DIR", "/app/magisk-template"))
 WINDOWS_TEMPLATE_DIR = Path(os.environ.get("WINDOWS_TEMPLATE_DIR", "/app/windows-client"))
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.3"
 MAGISK_VERSION = "1.3.0"
 WINDOWS_VERSION = "1.3.0"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -77,6 +78,7 @@ def csrf_token():
     return value
 
 app.jinja_env.globals["csrf_token"] = csrf_token
+app.jinja_env.globals["app_version"] = APP_VERSION
 
 def format_timestamp(value):
     if not value:
@@ -110,12 +112,36 @@ def secure_response(response):
     )
     if request.is_secure:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    if request.endpoint == "static":
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     if request.endpoint in {
         "admin_invites", "accept_invite", "create_magisk_module",
         "download_magisk_module", "create_windows_package", "download_windows_package",
+        "create_generic_device",
     }:
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
+
+    accepts_gzip = "gzip" in request.headers.get("Accept-Encoding", "").lower()
+    compressible = response.mimetype in {
+        "text/html", "text/css", "text/javascript", "application/javascript",
+        "application/json", "application/manifest+json",
+    }
+    if (
+        accepts_gzip and compressible and request.method != "HEAD"
+        and response.status_code == 200 and not response.headers.get("Content-Encoding")
+    ):
+        response.direct_passthrough = False
+        payload = response.get_data()
+        if len(payload) >= 1024:
+            compressed = gzip.compress(payload, compresslevel=6)
+            if len(compressed) < len(payload):
+                response.set_data(compressed)
+                response.headers["Content-Encoding"] = "gzip"
+                response.headers["Content-Length"] = str(len(compressed))
+                response.headers.pop("ETag", None)
+                response.headers.pop("Accept-Ranges", None)
+                response.vary.add("Accept-Encoding")
     return response
 
 def shell_quote(value):
@@ -378,6 +404,12 @@ def init_db():
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_events_device_event ON sync_events(source_device_id,event_id) WHERE event_id IS NOT NULL")
         c.execute("CREATE INDEX IF NOT EXISTS idx_clips_user_created ON clips(user_id,created_ts DESC,id DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_codes_user_created ON codes(user_id,created_ts DESC,id DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_clips_user_id_desc ON clips(user_id,id DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_codes_user_id_desc ON codes(user_id,id DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_clips_user_favorite_id ON clips(user_id,is_favorite,id DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_codes_user_favorite_id ON codes(user_id,is_favorite,id DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_files_user_id_desc ON files(user_id,id DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id,id)")
         conn.commit()
 
 init_db()
@@ -424,6 +456,13 @@ def healthz():
     with get_db() as conn:
         conn.execute("SELECT 1").fetchone()
     return {"status": "ok", "version": APP_VERSION}
+
+@app.route('/service-worker')
+def service_worker():
+    response = send_from_directory(app.static_folder, "sw.js", mimetype="application/javascript")
+    response.headers["Cache-Control"] = "no-cache, max-age=0"
+    response.headers["Expires"] = "0"
+    return response
 
 @app.route('/setup', methods=['GET', 'POST'])
 def setup():
@@ -822,6 +861,9 @@ def codes():
 @app.route('/devices')
 @login_required
 def devices():
+    return render_device_page()
+
+def load_device_rows():
     with get_db() as conn:
         rows = conn.execute(
             "SELECT id,name,platform,sync_mode,last_seen_at,last_sync_at,client_version,token_hash FROM devices WHERE user_id=?",
@@ -838,7 +880,40 @@ def devices():
         )
         item['token_active'] = bool(row['token_hash'])
         device_rows.append(item)
-    return render_template("devices.html", rows=device_rows, user_id=session['user_id'])
+    return device_rows
+
+def render_device_page(new_generic_device=None):
+    return render_template(
+        "devices.html", rows=load_device_rows(), user_id=session['user_id'],
+        new_generic_device=new_generic_device,
+    )
+
+@app.route('/devices/generic-token', methods=['POST'])
+@login_required
+def create_generic_device():
+    device_name = validate_device_name(request.form.get('name'))
+    sync_mode = request.form.get('sync_mode', 'both')
+    if not device_name:
+        flash("设备名称不能为空，且不能超过80个字符")
+        return redirect('/devices')
+    if sync_mode not in {'both', 'send_only', 'receive_only'}:
+        abort(400)
+
+    token = secrets.token_hex(32)
+    with get_db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO devices (user_id,name,token,token_hash,platform,sync_mode) VALUES (?,?,NULL,?,?,?)",
+            (session['user_id'], device_name, token_digest(token), 'generic', sync_mode),
+        )
+        device_id = cursor.lastrowid
+        conn.commit()
+
+    return render_device_page({
+        'id': device_id,
+        'name': device_name,
+        'token': token,
+        'server_url': get_public_base_url(),
+    })
 
 @app.route('/devices/<int:device_id>/sync-mode', methods=['POST'])
 @login_required
