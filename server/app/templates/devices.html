@@ -31,6 +31,42 @@
         <ol class="steps"><li>完整解压下载的 ZIP</li><li>双击“安装并启动.cmd”</li><li>客户端立即运行并自动加入登录启动项</li></ol>
     </section>
 
+    <section class="card span-12 generic-token-card">
+        <div class="generic-token-layout">
+            <div>
+                <div class="install-icon generic" aria-hidden="true">⌁</div>
+                <h2 class="card-title">其他软件 / 通用 Token</h2>
+                <p class="card-description">用于脚本、自动化工具或其他第三方客户端。生成后复制服务器地址和 Token，在请求中使用 <code>Authorization: Bearer TOKEN</code>。</p>
+                <form action="/devices/generic-token" method="post" class="form-stack">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <label><span class="field-label">设备名称</span><input type="text" name="name" maxlength="80" placeholder="例如：Linux 脚本、自动化工具" required></label>
+                    <label><span class="field-label">同步模式</span><select name="sync_mode">
+                        <option value="both">双向同步</option>
+                        <option value="send_only">仅发送</option>
+                        <option value="receive_only">仅接收</option>
+                    </select></label>
+                    <button type="submit" class="btn btn-primary btn-block">添加设备并生成 Token</button>
+                </form>
+            </div>
+            <div class="token-help">
+                {% if new_generic_device %}
+                <div class="token-result" role="status">
+                    <strong>{{ new_generic_device.name }} 已添加</strong>
+                    <p>Token 只显示这一次，请立即复制并妥善保存。服务器只保存它的哈希值。</p>
+                    <span class="field-label">服务器地址</span>
+                    <div class="token-value" id="generic-server-url">{{ new_generic_device.server_url }}</div>
+                    <button type="button" class="btn btn-soft btn-sm" onclick="copyText(document.getElementById('generic-server-url').textContent)">复制服务器地址</button>
+                    <span class="field-label token-field-label">设备 Token</span>
+                    <div class="token-value token-secret" id="generic-device-token">{{ new_generic_device.token }}</div>
+                    <button type="button" class="btn btn-primary btn-sm" onclick="copyText(document.getElementById('generic-device-token').textContent)">复制 Token</button>
+                </div>
+                {% else %}
+                <div class="notice token-placeholder"><strong>使用方式</strong><br>上传：<code>POST /api/push</code><br>接收：<code>GET /api/poll?after=0&amp;timeout=25</code><br>所有请求都在 Authorization 请求头中携带 Token。</div>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+
     <section class="card span-12">
         <div class="card-header"><div><h2 class="card-title">已授权设备</h2><p class="card-description no-bottom">重新下载会轮换令牌，旧安装随即失效。令牌在数据库中仅保存哈希。</p></div><span class="badge">{{ rows|length }} 台</span></div>
         <div class="device-grid">

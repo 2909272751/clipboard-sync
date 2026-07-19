@@ -258,7 +258,7 @@ a {
     min-height: 100dvh;
     margin-left: var(--sidebar-width);
     padding: 34px clamp(20px, 3vw, 48px) 56px;
-    animation: page-enter 420ms cubic-bezier(.2,.75,.25,1) both;
+    animation: page-enter 180ms cubic-bezier(.2,.75,.25,1) both;
 }
 
 .container {
@@ -351,15 +351,15 @@ a {
     border-radius: var(--radius-lg);
     background: rgba(255,255,255,0.94);
     box-shadow: var(--shadow-sm);
-    animation: surface-enter 480ms cubic-bezier(.2,.75,.25,1) backwards;
+    animation: surface-enter 220ms cubic-bezier(.2,.75,.25,1) backwards;
 }
 
 .container > .card:nth-child(2),
-.page-grid > .card:nth-child(2) { animation-delay: 55ms; }
+.page-grid > .card:nth-child(2) { animation-delay: 20ms; }
 .container > .card:nth-child(3),
-.page-grid > .card:nth-child(3) { animation-delay: 100ms; }
+.page-grid > .card:nth-child(3) { animation-delay: 40ms; }
 .container > .card:nth-child(4),
-.page-grid > .card:nth-child(4) { animation-delay: 145ms; }
+.page-grid > .card:nth-child(4) { animation-delay: 60ms; }
 
 .card-compact {
     padding: 20px;
@@ -647,14 +647,16 @@ input[type="file"]::file-selector-button {
     border-radius: var(--radius);
     background: #fff;
     transition: border-color 160ms ease, box-shadow 160ms ease;
-    animation: record-enter 360ms cubic-bezier(.2,.75,.25,1) backwards;
+    animation: record-enter 160ms cubic-bezier(.2,.75,.25,1) backwards;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 150px;
 }
 
-.record-row:nth-child(2) { animation-delay: 35ms; }
-.record-row:nth-child(3) { animation-delay: 70ms; }
-.record-row:nth-child(4) { animation-delay: 105ms; }
-.record-row:nth-child(5) { animation-delay: 140ms; }
-.record-row:nth-child(n+6) { animation-delay: 170ms; }
+.record-row:nth-child(2) { animation-delay: 12ms; }
+.record-row:nth-child(3) { animation-delay: 24ms; }
+.record-row:nth-child(4) { animation-delay: 36ms; }
+.record-row:nth-child(5) { animation-delay: 48ms; }
+.record-row:nth-child(n+6) { animation-delay: 60ms; }
 
 .record-row:hover {
     border-color: #d9daf0;
@@ -860,12 +862,12 @@ input[type="file"]::file-selector-button {
     box-shadow: var(--shadow-sm);
     text-decoration: none;
     transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
-    animation: surface-enter 480ms cubic-bezier(.2,.75,.25,1) backwards;
+    animation: surface-enter 220ms cubic-bezier(.2,.75,.25,1) backwards;
 }
 
-.quick-link:nth-child(2) { animation-delay: 55ms; }
-.quick-link:nth-child(3) { animation-delay: 100ms; }
-.quick-link:nth-child(4) { animation-delay: 145ms; }
+.quick-link:nth-child(2) { animation-delay: 20ms; }
+.quick-link:nth-child(3) { animation-delay: 40ms; }
+.quick-link:nth-child(4) { animation-delay: 60ms; }
 
 .quick-link:hover {
     border-color: #d6d7ec;
@@ -955,6 +957,65 @@ input[type="file"]::file-selector-button {
     background: var(--info-soft);
 }
 
+.install-icon.generic {
+    background: var(--accent-soft);
+}
+
+.generic-token-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 0.9fr);
+    align-items: start;
+    gap: clamp(22px, 4vw, 52px);
+}
+
+.token-help {
+    min-width: 0;
+}
+
+.token-result,
+.token-placeholder {
+    padding: 20px;
+    border: 1px solid rgba(15, 159, 135, 0.22);
+    border-radius: var(--radius);
+    background: linear-gradient(145deg, #f2fffc, #f8fbff);
+}
+
+.token-result p {
+    margin: 6px 0 18px;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.token-value {
+    margin: 6px 0 10px;
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: #fff;
+    font: 600 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+.token-secret {
+    color: var(--primary-strong);
+}
+
+.token-field-label {
+    display: block;
+    margin-top: 18px;
+}
+
+.token-placeholder {
+    color: var(--muted);
+    line-height: 1.9;
+}
+
+.token-placeholder code,
+.generic-token-card code {
+    overflow-wrap: anywhere;
+}
+
 .steps {
     display: grid;
     margin: 18px 0 0;
@@ -1000,6 +1061,8 @@ input[type="file"]::file-selector-button {
     border: 1px solid var(--line);
     border-radius: var(--radius);
     background: #fff;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 240px;
 }
 
 .device-card-head,
@@ -1094,6 +1157,8 @@ input[type="file"]::file-selector-button {
     gap: 12px;
     border: 1px solid var(--line);
     border-radius: 15px;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 72px;
 }
 
 .file-icon {
@@ -1206,22 +1271,6 @@ input[type="file"]::file-selector-button {
     to { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
 
-@view-transition {
-    navigation: auto;
-}
-
-::view-transition-old(root) {
-    animation: 120ms ease-out both fade-out;
-}
-
-::view-transition-new(root) {
-    animation: 240ms cubic-bezier(.2,.75,.25,1) both page-enter;
-}
-
-@keyframes fade-out {
-    to { opacity: 0; }
-}
-
 @media (max-width: 1180px) {
     .filter-grid {
         grid-template-columns: repeat(4, minmax(0,1fr));
@@ -1252,7 +1301,7 @@ input[type="file"]::file-selector-button {
         color: #fff;
         background: rgba(23,25,42,0.96);
         box-shadow: 0 6px 24px rgba(18,20,40,0.14);
-        backdrop-filter: blur(16px);
+        backdrop-filter: blur(8px);
     }
 
     .mobile-brand {
@@ -1353,6 +1402,10 @@ input[type="file"]::file-selector-button {
 }
 
 @media (max-width: 700px) {
+    .generic-token-layout {
+        grid-template-columns: 1fr;
+    }
+
     body {
         font-size: 15px;
     }

@@ -27,10 +27,12 @@ The first account is the administrator. Registration is closed by default. From 
 - Windows and Magisk clients keep the latest unsent clipboard item on disk. A temporary network outage or client restart does not lose it; a newer local copy replaces the older pending item.
 - Windows records its receive cursor and automatically fetches the latest missed item after sleep, network recovery, or a realtime reconnect.
 - The **Devices** page shows online state, client version, last activity, last successful sync, and whether the token is active.
+- The **Devices** page can create a generic one-time-visible token for scripts and third-party clients; only its SHA-256 digest is stored.
 - Each device can use bidirectional, send-only, receive-only, or paused mode without rebuilding its package.
 - Users can change their own password. Administrators can disable ordinary accounts or assign a temporary password; disabling an account preserves its devices, files, and history.
 - Clipboard and code history supports content, device, date, and page-size filters. The database retains the complete history unless the user explicitly deletes it.
 - The web interface uses a responsive sidebar/mobile drawer, adaptive cards and forms, accessible focus states, and reduced-motion-aware transitions across desktop, tablet, and phone layouts.
+- Versioned long-lived static caching, gzip responses, faster GPU-friendly transitions, and deferred rendering keep repeat visits and long history pages responsive on slower networks and phones.
 
 ## Automatic HTTPS
 

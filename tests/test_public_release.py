@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import hashlib
+import gzip
 import os
 import re
 import sqlite3
@@ -41,6 +42,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
         cls.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.module)
         cls.module.app.template_folder = str(APP_FILE.parent / "templates")
+        cls.module.app.static_folder = str(APP_FILE.parent / "static")
         cls.module.app.config.update(TESTING=True)
         setup_client = cls.module.app.test_client()
         setup_client.get("/setup")
@@ -342,7 +344,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
             )
 
     def test_authenticated_pages_share_the_responsive_shell(self):
-        self.assertEqual(self.client.get("/healthz").get_json()["version"], "1.3.1")
+        self.assertEqual(self.client.get("/healthz").get_json()["version"], "1.3.3")
         for path in (
             "/", "/clips", "/codes", "/favorites", "/files", "/devices",
             "/account", "/admin/invites", "/admin/users",
@@ -352,7 +354,7 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 page = response.get_data(as_text=True)
                 self.assertIn('viewport-fit=cover', page)
-                self.assertIn('/static/app.css', page)
+                self.assertIn('/static/app.css?v=1.3.3', page)
                 self.assertIn('id="main-content"', page)
                 self.assertIn('class="mobile-topbar"', page)
                 self.assertNotIn('user-scalable=no', page)
@@ -365,14 +367,69 @@ class PersonalizedMagiskModuleTests(unittest.TestCase):
             "@media (max-width: 700px)",
             "@media (max-width: 480px)",
             "@media (prefers-reduced-motion: reduce)",
-            "@view-transition",
             "animation: page-enter",
+            "animation: page-enter 180ms",
+            "content-visibility: auto",
             "overflow-wrap: anywhere",
             "min-width: 0",
         ):
             self.assertIn(marker, css)
+        self.assertNotIn("@view-transition", css)
         for template in TEMPLATE_DIR.glob("*.html"):
             self.assertNotIn('style=', template.read_text(encoding="utf-8"), template.name)
+
+    def test_static_assets_are_versioned_cached_and_compressed(self):
+        response = self.client.get(
+            "/static/app.css?v=1.3.3",
+            headers={"Accept-Encoding": "gzip"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Encoding"], "gzip")
+        self.assertIn("immutable", response.headers["Cache-Control"])
+        self.assertIn(":root", gzip.decompress(response.data).decode("utf-8"))
+        response.close()
+
+        worker = self.client.get("/service-worker")
+        self.assertEqual(worker.status_code, 200)
+        self.assertIn("no-cache", worker.headers["Cache-Control"])
+        self.assertIn("clipboard-sync-static-v1.3.3", worker.get_data(as_text=True))
+        worker.close()
+
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('"gunicorn"', dockerfile)
+        self.assertIn('"gthread"', dockerfile)
+
+    def test_generic_device_token_is_shown_once_and_only_hash_is_stored(self):
+        response = self.secure_post(
+            "/devices/generic-token",
+            data={"name": "Linux automation", "sync_mode": "send_only"},
+            base_url=self.base_url,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        page = response.get_data(as_text=True)
+        match = re.search(r'id="generic-device-token">([0-9a-f]{64})<', page)
+        self.assertIsNotNone(match)
+        raw_token = match.group(1)
+        self.assertIn(f'id="generic-server-url">{self.base_url}<', page)
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT token,token_hash,platform,sync_mode FROM devices WHERE name=? ORDER BY id DESC LIMIT 1",
+                ("Linux automation",),
+            ).fetchone()
+        self.assertEqual(row, (
+            None, hashlib.sha256(raw_token.encode()).hexdigest(), "generic", "send_only",
+        ))
+        self.assertNotIn(raw_token, self.client.get("/devices", base_url=self.base_url).get_data(as_text=True))
+
+        pushed = self.client.post(
+            "/api/push",
+            json={"content": "generic-client-payload", "event_id": f"generic-{time.time_ns()}"},
+            headers={"Authorization": f"Bearer {raw_token}"},
+        )
+        self.assertEqual(pushed.status_code, 200)
+        self.assertEqual(pushed.get_json()["status"], "ok")
 
     def test_clipboard_page_searches_content_and_device(self):
         marker = f"search-marker-{time.time_ns()}"
