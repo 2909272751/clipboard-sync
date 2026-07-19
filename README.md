@@ -27,6 +27,7 @@ The first account is the administrator. Registration is closed by default. From 
 - Windows and Magisk clients keep the latest unsent clipboard item on disk. A temporary network outage or client restart does not lose it; a newer local copy replaces the older pending item.
 - Windows records its receive cursor and automatically fetches the latest missed item after sleep, network recovery, or a realtime reconnect.
 - The **Devices** page shows online state, client version, last activity, last successful sync, and whether the token is active.
+- Device diagnostics summarize connection health and the last transport without extra polling, while managed Windows/Magisk clients show an update prompt when they fall behind the bundled version.
 - The **Devices** page can create a generic one-time-visible token for scripts and third-party clients; only its SHA-256 digest is stored.
 - Each device can use bidirectional, send-only, receive-only, or paused mode without rebuilding its package.
 - Users can change their own password. Administrators can disable ordinary accounts or assign a temporary password; disabling an account preserves its devices, files, and history.

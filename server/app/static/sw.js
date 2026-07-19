@@ -1,9 +1,9 @@
-const STATIC_CACHE = 'clipboard-sync-static-v1.3.3';
+const STATIC_CACHE = 'clipboard-sync-static-v1.3.4';
 const STATIC_ASSETS = [
-  '/static/app.css?v=1.3.3',
-  '/static/manifest.json?v=1.3.3',
-  '/static/icon-192.png?v=1.3.3',
-  '/static/icon-512.png?v=1.3.3'
+  '/static/app.css?v=1.3.4',
+  '/static/manifest.json?v=1.3.4',
+  '/static/icon-192.png?v=1.3.4',
+  '/static/icon-512.png?v=1.3.4'
 ];
 
 self.addEventListener('install', (event) => {
