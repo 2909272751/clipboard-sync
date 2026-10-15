@@ -1,0 +1,577 @@
+#!/system/bin/sh
+#
+# SMS + Clipboard Sync — supervisor.
+#
+# Launched at boot by service.sh as root. It keeps two `app_process` bridges
+# alive, each with its own independent restart/backoff loop, and keeps the shared
+# log from growing without bound.
+#
+# Why two processes with two different UIDs:
+#   UID 1000 (system) — required for clipboard access. `setPrimaryClip` works
+#                       there and only there; confirmed live on the device.
+#   UID 2000 (shell)  — required for SMS access. MIUI blocks the system UID from
+#                       content://sms, but the shell UID can read it.
+# Both entry classes live in the SAME clipbridge.jar; app_process selects the
+# class by name.
+#
+# ---------------------------------------------------------------------------
+# Design note — why the loops are child PROCESSES and not backgrounded subshells
+# ---------------------------------------------------------------------------
+# On this device /system/bin/sh is mksh R59. Everything below was reproduced live
+# on the device; see _recon/FINDINGS-mksh-supervision.md for the raw transcript
+# and for two claims that were retracted after re-testing.
+#
+# The construct that actually breaks is nesting a `wait` inside a backgrounded
+# subshell and then waiting on that subshell from the parent:
+#
+#     worker() { su 1000 -c '...' & wait "$!"; }
+#     ( worker ) >log 2>&1 &
+#     wait "$!"        # <-- returns IMMEDIATELY instead of blocking
+#
+# When that happens the supervisor falls straight through to its cleanup/exit
+# path while the loop subshell and its bridge grandchild are still alive, so the
+# bridge leaks and keeps being respawned. That is the failure this design avoids.
+#
+# Two related mksh facts, both confirmed:
+#   * `$!` after `( cmd ) &` with no redirection is the LAST COMMAND's pid, not a
+#     subshell pid (the subshell was never forked), so it is already gone by the
+#     time cleanup wants to use it.
+#   * `$$` inside a subshell is the PARENT's pid; `$BASHPID` is the real one.
+#
+# Running each loop as its own PROCESS, started by re-executing this script with
+# `--loop <role>`, sidesteps all of it: `$!` is a genuine separately-exec'd
+# process, TERM reaches it reliably, and it carries its own trap that stops its own
+# bridge. The parent then babysits with a watchdog instead of relying on `wait`.
+#
+# Usage:
+#   clipsyncd [MODDIR]                 supervisor (default)
+#   clipsyncd --loop clipboard [MODDIR]
+#   clipsyncd --loop sms [MODDIR]
+
+STATE_DIR=/data/adb/clipboard-sync
+LOG_FILE="$STATE_DIR/clipboard-sync.log"
+PID_FILE="$STATE_DIR/clipboard-syncd.pid"
+BRIDGE_PIDFILE="$STATE_DIR/clipboard-syncd.bridge.pid"
+
+CLIP_CLASS=com.clipsync.bridge.Main
+SMS_CLASS=com.clipsync.bridge.SmsForwarder
+
+# Runtime inputs are staged per UID by service.sh: /data/adb is not readable by
+# Android's shell UID, and the SMS forwarder additionally runs as UID 2000, which
+# cannot read through the clipboard bridge's 0700 / owner-1000 directory.
+#   CLIP_RUNTIME_DIR  dir 0700 owner 1000:1000, files 0600 -> UID 1000 clipboard
+#   SMS_RUNTIME_DIR   dir 0755 owner 0:0,       files 0644 -> UID 2000 SMS
+CLIP_RUNTIME_DIR=/data/local/tmp/clipboard-sync
+SMS_RUNTIME_DIR=/data/local/tmp/clipboard-sync-sms
+
+# UIDs. Clipboard MUST be 1000 (setPrimaryClip only works there); SMS MUST be
+# 2000 because MIUI blocks the system UID from content://sms.
+CLIP_UID=1000
+SMS_UID=2000
+
+LOG_MAX_BYTES=1048576   # ~1 MB
+LOG_KEEP_LINES=2000
+
+# How often the parent checks that its two loops are still alive. Logging happens
+# ONLY on a real state change (started / died / restarting) — never once per tick.
+# The upstream Msg2Bark module logged on every 1-second tick and produced a
+# 1.47 GB log; a watchdog that chatters would recreate that problem by itself.
+WATCHDOG_SECONDS=15
+
+# Loop pids, one per role.
+CLIP_LOOP_PIDFILE="$STATE_DIR/.clipsyncd.clip.loop.pid"
+SMS_LOOP_PIDFILE="$STATE_DIR/.clipsyncd.sms.loop.pid"
+
+mkdir -p "$STATE_DIR"
+
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
+}
+
+# --- log rotation ----------------------------------------------------------
+# The upstream Msg2Bark module appended to an unbounded file and reached 1.47 GB.
+# Never again: cap the shared log, keeping the newest lines.
+#
+# The old contents are moved to <log>.1 first (overwriting the previous archive),
+# so `tail` reads the archive while writing the live file and never truncates the
+# data it is itself reading. Only one archive generation is kept, so total disk
+# use is bounded at roughly LOG_MAX_BYTES plus the size of the kept tail — the
+# archive cannot accumulate across repeated rotations because each rotation
+# replaces it.
+cap_log() {
+  [ -f "$LOG_FILE" ] || return 0
+  _size=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d ' \t')
+  case "$_size" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$_size" -gt "$LOG_MAX_BYTES" ] || return 0
+
+  mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || return 0
+  tail -n "$LOG_KEEP_LINES" "$LOG_FILE.1" > "$LOG_FILE" 2>/dev/null || : > "$LOG_FILE"
+
+  # Keeping N lines is not by itself a byte guarantee: a run of very long lines
+  # (a Java stack trace, a captured response body) could leave the kept tail
+  # larger than the cap. Re-check and cut again from the tail until it fits, so
+  # the size promise holds for any line length.
+  #
+  # Room is reserved for the rotation note that is appended below, otherwise the
+  # final file overshoots the cap by exactly the length of that note.
+  _budget=$((LOG_MAX_BYTES - 160))
+  _pass=0
+  while [ "$_pass" -lt 4 ]; do
+    _kept=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d ' \t')
+    case "$_kept" in
+      ''|*[!0-9]*) break ;;
+    esac
+    [ "$_kept" -le "$_budget" ] && break
+    tail -c "$_budget" "$LOG_FILE" > "$LOG_FILE.cut" 2>/dev/null || break
+    mv -f "$LOG_FILE.cut" "$LOG_FILE" 2>/dev/null || break
+    _pass=$((_pass + 1))
+  done
+
+  chmod 0640 "$LOG_FILE" 2>/dev/null
+  echo "$(date '+%Y-%m-%d %H:%M:%S') log rotated: was ${_size} bytes, kept last ${LOG_KEEP_LINES} lines" >> "$LOG_FILE"
+}
+
+# Is <pid> alive AND is it <pattern>? A pid alone is not trusted: pids are
+# recycled, and after a reboot a stale pidfile could point at an unrelated
+# process we must not kill.
+pid_is() {
+  _pid="$1"
+  _pat="$2"
+  case "$_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$_pid" 2>/dev/null || return 1
+  tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | grep -q "$_pat"
+}
+
+# Is <pid> this supervisor (i.e. NOT one of its `--loop` children)? Used by the
+# single-instance guard: `pid_is <pid> clipsyncd` is true for a loop as well, so
+# the guard needs to exclude --loop processes or it would treat its own child as a
+# competing supervisor. Reads argv, so it cannot be fooled by the file's contents.
+pid_is_supervisor() {
+  _pid="$1"
+  pid_is "$_pid" 'clipsyncd' || return 1
+  tr '\000' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | grep -q -- '--loop' && return 1
+  return 0
+}
+
+# --- bridge reaping: THE fix for the duplicate-SMS bug ---------------------
+#
+# WHAT WENT WRONG (reproduced live on the device, not theoretical)
+# ---------------------------------------------------------------
+# The bridge is launched as:
+#     su "$_uid" -c "CLASSPATH=... app_process /system/bin $_class '$_cfg'" &
+#     _bridge_pid=$!
+# `$!` is the pid of the `sh -c` WRAPPER that `su` forks, NOT the JVM. The JVM is
+# the wrapper's CHILD:
+#     10613  clipsyncd --loop sms
+#     10638  sh -c "CLASSPATH=... app_process ... SmsForwarder ..."   <- $! records THIS
+#     10639  app_process ... com.clipsync.bridge.SmsForwarder ...      <- the real JVM
+# Killing only $_bridge_pid therefore kills the WRAPPER and reparents the JVM to
+# pid 1, where it keeps running forever. Measured on device:
+#     jvm_sms_before=1
+#     (kill wrapper 10638 exactly as the old loop_cleanup did)
+#     jvm_sms_after_wrapper_kill=2      <- 10639 orphaned (PPID 1) + a new bridge
+# EVERY orphan is an independent observer that forwards the same SMS, so N orphans
+# multiply a burst: 8 SMS -> 16 forwards, 50 SMS -> 120. With exactly one bridge,
+# 8 SMS -> 8 forwards (correct).
+#
+# THE FIX: reap by CLASS NAME, on EVERY restart path, not only in the EXIT trap.
+# `pkill -KILL -f "$_class"` matches the JVM (and the wrapper, whose cmdline also
+# contains the class) but can never match this script or the supervisor, because
+# pkill -f matches each process's own /proc/<pid>/cmdline — i.e. argv — and the
+# class name is never an argv element of the loop or the supervisor. The class
+# names appear in this FILE (as the variable assignments below), which is
+# irrelevant: a script's file contents are not its cmdline. Keep it that way — do
+# not put a literal class name into a command line this script itself runs.
+#
+# Usage: reap_bridge <class> <role-label> [<pid-to-also-kill>]
+# Returns 0 once no process matches <class>, 1 if any survived the bounded wait.
+# The loop is bounded (~5s) so a wedged process can never hang the supervisor
+# forever; on timeout we log and return non-zero rather than spinning.
+REAP_WAIT_SECONDS=5
+
+reap_bridge() {
+  _rb_class="$1"
+  _rb_role="$2"
+  _rb_pid="$3"
+
+  # Fast path: nothing of this class is running, and no explicit pid to drop.
+  # `pgrep -f` is the same matcher as `pkill -f`, so the two agree exactly.
+  if [ -z "$_rb_pid" ] && ! pgrep -f "$_rb_class" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  _rb_found=$(pgrep -f "$_rb_class" 2>/dev/null | tr '\n' ' ' | sed 's/[ 	]*$//')
+  if [ -n "$_rb_pid" ]; then
+    case "$_rb_pid" in
+      ''|*[!0-9]*) ;;
+      *) _rb_found="${_rb_found:+$_rb_found }$_rb_pid" ;;
+    esac
+  fi
+  log "$_rb_role: reaping pre-existing bridge process(es): ${_rb_found:-none-of-class}"
+
+  # Kill the recorded pid AND everything matching the class. The class kill is
+  # what actually gets the JVM; the pid kill is belt-and-braces for the wrapper
+  # in the (device-dependent) case where `su` execs the command directly and
+  # $_bridge_pid really is the JVM.
+  pkill -KILL -f "$_rb_class" >/dev/null 2>&1 || true
+  if [ -n "$_rb_pid" ]; then
+    kill -TERM "$_rb_pid" >/dev/null 2>&1 || true
+    kill -KILL "$_rb_pid" >/dev/null 2>&1 || true
+  fi
+
+  # Bounded wait: ~5s in 0.2s steps, so a normal reap returns almost immediately
+  # and only a genuinely wedged process makes us wait.
+  _rb_left=$((REAP_WAIT_SECONDS * 5))
+  while [ "$_rb_left" -gt 0 ]; do
+    pgrep -f "$_rb_class" >/dev/null 2>&1 || return 0
+    sleep 0.2 2>/dev/null || sleep 1
+    _rb_left=$((_rb_left - 1))
+  done
+
+  # Still alive after the bounded wait. Report the ACTUAL pids so the log says
+  # which process refused to die instead of a bare "timed out".
+  _rb_surv=$(pgrep -f "$_rb_class" 2>/dev/null | tr '\n' ' ' | sed 's/[ 	]*$//')
+  log "$_rb_role: WARNING bridge(s) survived SIGKILL after ${REAP_WAIT_SECONDS}s: ${_rb_surv:-unknown}"
+  return 1
+}
+
+# --- loop mode -------------------------------------------------------------
+# One supervised bridge. Runs as its own process so it can be signalled, and
+# stops its own bridge when it is signalled.
+loop_main() {
+  _role="$1"
+  _moddir="$2"
+
+  case "$_role" in
+    clipboard)
+      _uid="$CLIP_UID"
+      _class="$CLIP_CLASS"
+      _jar="$CLIP_RUNTIME_DIR/clipbridge.jar"
+      _cfg="$CLIP_RUNTIME_DIR/config.conf"
+      ;;
+    sms)
+      _uid="$SMS_UID"
+      _class="$SMS_CLASS"
+      _jar="$SMS_RUNTIME_DIR/clipbridge.jar"
+      _cfg="$SMS_RUNTIME_DIR/config.conf"
+      ;;
+    *)
+      log "unknown loop role: $_role"
+      exit 1
+      ;;
+  esac
+
+  # Refuse to run if the UID cannot actually be assumed. Asking the target
+  # identity to print its own uid is the only reliable check; `su` can silently
+  # fall back to root on some Magisk configurations.
+  if ! su "$_uid" -c 'id -u' 2>/dev/null | grep -q "^$_uid\$"; then
+    log "$_role: UID $_uid is unavailable; not starting"
+    exit 1
+  fi
+
+  # Stop our own bridge when we are terminated, so no orphan is left behind.
+  #
+  # Deliberately NON-BLOCKING on the trap path: this handler can run from a signal
+  # that interrupted a `sleep`, and on mksh a trap handler that itself sleeps can
+  # wedge (see the note in the supervisor's stop_loop). So cleanup kills by pid and
+  # by class name once, with no polling — the polling/waiting version is
+  # reap_bridge(), which is called at the TOP of every loop iteration where it is
+  # safe to block.
+  _bridge_pid=""
+  loop_cleanup() {
+    trap - EXIT HUP INT TERM
+    if [ -n "$_bridge_pid" ]; then
+      # No negative-pgid kill: the bridge inherits this script's process group, so
+      # `kill -TERM -pid` would target our own group (and fail anyway — verified).
+      # Note this only reaches the `su` wrapper; the class-name pkill below is what
+      # actually kills the JVM, which is the child of that wrapper.
+      kill -TERM "$_bridge_pid" >/dev/null 2>&1 || true
+      kill -KILL "$_bridge_pid" >/dev/null 2>&1 || true
+    fi
+    # The real reap: kills the JVM (and its wrapper). The class name cannot appear
+    # in this script's own cmdline, so this only ever hits a real bridge.
+    pkill -KILL -f "$_class" >/dev/null 2>&1 || true
+    rm -f "$BRIDGE_PIDFILE" 2>/dev/null
+    log "$_role: loop stopped"
+    exit 0
+  }
+  trap loop_cleanup EXIT HUP INT TERM
+
+  log "$_role: loop started (pid $$, uid $_uid)"
+
+  _delay=2
+  while true; do
+    # ---------------------------------------------------------------
+    # REAP BEFORE LAUNCH — the fix for the duplicate-SMS bug.
+    # ---------------------------------------------------------------
+    # This runs on EVERY iteration, not just in the EXIT trap. A previous bridge
+    # can be left running by any restart path that did not go through
+    # loop_cleanup: the supervisor's watchdog restarting a loop it believed dead,
+    # a service.sh restart path, a KILL the loop never got to trap, or a stale
+    # orphan from an earlier boot. Reaping here unconditionally means at most ONE
+    # bridge of this class can ever exist, whoever started the others.
+    #
+    # Reap BEFORE the staging check on purpose: if the jar/config went missing we
+    # still must not leave last iteration's bridge running unsupervised.
+    reap_bridge "$_class" "$_role" ""
+
+    if [ ! -r "$_jar" ] || [ ! -r "$_cfg" ]; then
+      log "$_role: staging unavailable (jar=$_jar config=$_cfg); retrying in 30s"
+      sleep 30
+      continue
+    fi
+
+    log "$_role: starting event bridge as UID $_uid"
+    _started=$(date +%s)
+
+    # Backgrounded on purpose: `su` would otherwise make this function a process
+    # we cannot signal while the bridge runs, and recording its pid is what lets
+    # loop_cleanup stop exactly this bridge.
+    #
+    # CAUTION: $_bridge_pid is the `sh -c` WRAPPER forked by su, NOT the JVM. It
+    # is recorded for the wrapper kill in loop_cleanup and for the bridge pidfile,
+    # but it must NEVER be the only thing killed on a restart — that is exactly
+    # the bug reap_bridge() at the top of this loop exists to close.
+    su "$_uid" -c "CLASSPATH='$_jar' /system/bin/app_process /system/bin $_class '$_cfg'" &
+    _bridge_pid=$!
+    echo "$_bridge_pid" > "$BRIDGE_PIDFILE"
+    wait "$_bridge_pid"
+    _bridge_pid=""
+    rm -f "$BRIDGE_PIDFILE" 2>/dev/null
+
+    # The wrapper exiting does NOT mean the JVM exited: if the JVM outlives its
+    # wrapper (or the wait was interrupted) it is still forwarding SMS. Reap here
+    # too, so the process count is correct for the whole backoff window instead of
+    # only from the next iteration onward.
+    reap_bridge "$_class" "$_role" ""
+
+    _ran=$(( $(date +%s) - _started ))
+    cap_log
+    log "$_role: event bridge exited after ${_ran}s; retrying in ${_delay}s"
+    sleep "$_delay"
+
+    # Reset the backoff only after a run that lasted long enough to be healthy
+    # (>=60s). A bridge that dies instantly is retried progressively more slowly
+    # instead of hammering the CPU — which is what the upstream module's
+    # 1-second tick did.
+    if [ "$_ran" -ge 60 ]; then
+      _delay=2
+    else
+      _delay=$((_delay * 2))
+      [ "$_delay" -gt 60 ] && _delay=60
+    fi
+  done
+}
+
+# --- supervisor mode -------------------------------------------------------
+supervisor_main() {
+  _moddir="$1"
+
+  # Legacy state left behind by the Msg2Bark module we replace. Both files are
+  # bookkeeping/race-guards for the old one-shot mf.sh script and are meaningless
+  # here; a stale lock in particular is exactly the kind of leftover that would
+  # silently disable a future script still looking for it.
+  rm -f /data/local/tmp/msg2bark_last_id /data/local/tmp/msg2bark.lock 2>/dev/null
+
+  cap_log
+
+  # --- single-instance guard (supervisor) -----------------------------------
+  # Hardened so that a CONCURRENT second start cannot race past it. The pidfile
+  # alone is not trusted: the pid must still exist AND its cmdline must still be
+  # this supervisor. But a pidfile check alone is racy — two supervisors starting
+  # at the same moment both read "no live pidfile" and both proceed, and TWO
+  # supervisors means TWO loops per role and therefore two bridges per role, which
+  # is the same duplicate-forwarding failure by another route.
+  #
+  # So the check is repeated against the REAL process table, not just the pidfile:
+  # any live process whose cmdline is this script in supervisor mode (plain
+  # `clipsyncd <moddir>`, i.e. NOT `--loop`) means an instance already exists.
+  # The pattern below cannot match a loop (loops always carry `--loop`) and cannot
+  # match this shell's own transient grep, because it is matched with pgrep -f
+  # against argv, and the literal is built to avoid self-matching.
+  #
+  # Belt and braces on top of the pidfile: drop any supervisor pid that is not us
+  # and is genuinely running this script.
+  for _sp in $(pgrep -f 'bin/clipsyncd' 2>/dev/null); do
+    [ "$_sp" = "$$" ] && continue
+    # pid_is_supervisor is false for --loop children, so our own loops are not
+    # mistaken for a competing supervisor.
+    if pid_is_supervisor "$_sp"; then
+      log "supervisor already running as pid $_sp (process-table check); exiting"
+      exit 0
+    fi
+  done
+
+  if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
+    if [ "$OLD_PID" != "$$" ] && pid_is_supervisor "$OLD_PID"; then
+      log "supervisor already running as pid $OLD_PID"
+      exit 0
+    fi
+  fi
+
+  # The pidfile is written AFTER the guard, so a racing second instance that lost
+  # the race cannot have overwritten the winner's pid with its own.
+  echo "$$" > "$PID_FILE"
+
+  # Stop one loop process. Deliberately NON-BLOCKING: it must not sleep or poll
+  # inside a trap handler. On mksh, a signal-interrupted `sleep` combined with a
+  # trap that itself sleeps wedges the handler — observed live as a supervisor
+  # that logged "supervisor stopping" and then never exited. So: send TERM, and
+  # if the loop is a stubborn one just escalate to KILL immediately. A loop needs
+  # no graceful shutdown window; its own trap already kills its bridge.
+  stop_loop() {
+    _f="$1"
+    _p=$(cat "$_f" 2>/dev/null)
+    if pid_is "$_p" 'clipsyncd'; then
+      kill -TERM "$_p" >/dev/null 2>&1 || true
+      kill -KILL "$_p" >/dev/null 2>&1 || true
+    fi
+    rm -f "$_f" 2>/dev/null
+  }
+
+  # Stop both loops, then any bridge they failed to stop, then our own pidfile.
+  # Every kill here is by explicit pid or by bridge CLASS name — never by the
+  # pattern 'clipsyncd', which would match this very process (its argv[0] is the
+  # script path and argv[1] is MODDIR) and make the supervisor kill itself before
+  # it could kill anything else.
+  #
+  # No sleeps and no polling: cleanup must complete in one pass, because it runs
+  # from a trap on a signal that may itself have interrupted a `sleep`.
+  supervisor_cleanup() {
+    trap - EXIT HUP INT TERM
+    stop_loop "$CLIP_LOOP_PIDFILE"
+    stop_loop "$SMS_LOOP_PIDFILE"
+    pkill -KILL -f "$CLIP_CLASS" >/dev/null 2>&1 || true
+    pkill -KILL -f "$SMS_CLASS" >/dev/null 2>&1 || true
+    rm -f "$BRIDGE_PIDFILE" 2>/dev/null
+    log "supervisor stopped"
+    [ "$(cat "$PID_FILE" 2>/dev/null)" = "$$" ] && rm -f "$PID_FILE"
+
+    # MUST exit explicitly. Trapping a signal and merely returning from the
+    # handler does not terminate the script: mksh resumes the interrupted loop,
+    # so the watchdog would come back to life and restart the loops we just
+    # killed (observed live). Trapping TERM means we own the shutdown path.
+    exit 0
+  }
+  trap supervisor_cleanup EXIT HUP INT TERM
+
+  # Start one loop process, ADOPTING an existing one instead of spawning a second.
+  #
+  # WHY THE ADOPT PATH EXISTS
+  # -------------------------
+  # A duplicate loop is a duplicate bridge: each loop spawns and supervises its own
+  # bridge on its own schedule, so two loops drift back to two (or more) live JVMs
+  # and every one of them forwards the same SMS. The orphan bug and the duplicate
+  # loop are therefore the same user-visible failure by two routes, and guarding
+  # only the bridge would not be enough.
+  #
+  # The watchdog calls this whenever `pid_is "$(cat "$LOOP_PIDFILE")" 'clipsyncd'`
+  # says a loop is gone. That test uses the PIDFILE's pid, so it has a real failure
+  # mode: if the pidfile is missing/stale/truncated (service.sh deletes these files
+  # on its restart path, and the write is not atomic) while the loop itself is
+  # perfectly healthy, the watchdog concludes "gone" and starts a SECOND loop next
+  # to the live one. The pidfile is bookkeeping; the PROCESS TABLE is the truth.
+  #
+  # So before spawning, look for a live process actually running this role:
+  #     pgrep -f "bin/clipsyncd --loop <role>"
+  # If one exists, adopt it: record its pid in the pidfile and start nothing. The
+  # pattern includes `--loop <role>` so it can never match the supervisor (whose
+  # argv has no --loop) nor the OTHER role's loop, and it cannot match this shell's
+  # own grep/cmdline because the role word is taken from our own argv, not typed
+  # into a grep command line.
+  #
+  # `$!` here is a genuine process (this is not a backgrounded subshell), so the
+  # pid we record is signalable and reliable.
+  start_loop() {
+    _role="$1"
+    _f="$2"
+
+    # Match the script path AND the role, so neither the supervisor, the other
+    # role's loop, nor any unrelated `sh` can be adopted by mistake.
+    _pat="bin/clipsyncd --loop $_role"
+    _existing=$(pgrep -f "$_pat" 2>/dev/null | head -n 1)
+
+    if [ -n "$_existing" ]; then
+      _recorded=$(cat "$_f" 2>/dev/null)
+      if [ "$_existing" = "$_recorded" ]; then
+        # Already known to us and healthy: nothing to do, and nothing to log on
+        # every watchdog tick (a chattering watchdog is its own bug — see the
+        # note on WATCHDOG_SECONDS).
+        return 0
+      fi
+      # A live loop we did not know about, or a stale pidfile. Adopt it rather
+      # than starting a twin.
+      echo "$_existing" > "$_f"
+      log "$_role: adopting existing loop pid $_existing (pidfile said '${_recorded:-none}'); not starting a second one"
+      return 0
+    fi
+
+    "$0" --loop "$_role" "$_moddir" >> "$LOG_FILE" 2>&1 &
+    echo "$!" > "$_f"
+    log "started $_role loop as pid $(cat "$_f")"
+  }
+
+  # Degrade instead of dying. A ROM where only one UID is usable should still get
+  # the other feature rather than losing the whole module.
+  CLIP_OK=0
+  if su "$CLIP_UID" -c 'id -u' 2>/dev/null | grep -q "^$CLIP_UID\$"; then
+    CLIP_OK=1
+  else
+    log "Android system UID $CLIP_UID is unavailable — clipboard sync disabled"
+  fi
+
+  SMS_OK=0
+  if su "$SMS_UID" -c 'id -u' 2>/dev/null | grep -q "^$SMS_UID\$"; then
+    SMS_OK=1
+  else
+    log "Android shell UID $SMS_UID is unavailable — SMS forwarding disabled"
+  fi
+
+  if [ "$CLIP_OK" = "0" ] && [ "$SMS_OK" = "0" ]; then
+    log "neither UID $CLIP_UID nor UID $SMS_UID is available; giving up"
+    exit 1
+  fi
+
+  [ "$CLIP_OK" = "1" ] && start_loop clipboard "$CLIP_LOOP_PIDFILE"
+  [ "$SMS_OK" = "1" ] && start_loop sms "$SMS_LOOP_PIDFILE"
+
+  # Watchdog. Polling rather than `wait`, because the nested-wait construct above
+  # cannot be used safely; this costs one `kill -0` plus a /proc read per tick and
+  # logs nothing while everything is healthy.
+  #
+  # The sleep is broken into 1-second steps on purpose: mksh defers a trap until
+  # the current foreground command finishes, so a single `sleep 15` would make a
+  # `kill` of this supervisor take up to 15s to have any effect. Stepping lets the
+  # trap run within about a second.
+  while true; do
+    _t=0
+    while [ "$_t" -lt "$WATCHDOG_SECONDS" ]; do
+      sleep 1
+      _t=$((_t + 1))
+    done
+
+    if [ "$CLIP_OK" = "1" ] && ! pid_is "$(cat "$CLIP_LOOP_PIDFILE" 2>/dev/null)" 'clipsyncd'; then
+      log "clipboard loop is gone; restarting it"
+      start_loop clipboard "$CLIP_LOOP_PIDFILE"
+    fi
+
+    if [ "$SMS_OK" = "1" ] && ! pid_is "$(cat "$SMS_LOOP_PIDFILE" 2>/dev/null)" 'clipsyncd'; then
+      log "sms loop is gone; restarting it"
+      start_loop sms "$SMS_LOOP_PIDFILE"
+    fi
+
+    cap_log
+  done
+}
+
+# --- dispatch --------------------------------------------------------------
+if [ "$1" = "--loop" ]; then
+  loop_main "$2" "$3"
+else
+  supervisor_main "${1:-${0%/system/bin/*}}"
+fi

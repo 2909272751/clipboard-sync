@@ -1784,3 +1784,72 @@ input[type="file"]::file-selector-button {
         animation-iteration-count: 1 !important;
     }
 }
+
+/* --- Magisk package options (功能勾选) ---------------------------------------
+   Added for the SMS + WeCom checkboxes on the Devices page. Kept in the same
+   visual language as .field-label / .form-stack above: same text colour, weight
+   and 7px rhythm, so the new block does not look bolted on. */
+.package-options {
+    display: grid;
+    gap: 11px;
+    margin: 0;
+    padding: 13px 14px 14px;
+    border: 1px solid #e3e5ee;
+    border-radius: 12px;
+    background: #fafbfe;
+}
+
+.package-options > legend {
+    padding: 0 6px;
+    margin-bottom: 0;
+}
+
+.checkbox-row {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+    align-items: start;
+    cursor: pointer;
+}
+
+.checkbox-row input[type="checkbox"] {
+    width: 17px;
+    height: 17px;
+    margin: 2px 0 0;
+    accent-color: #4f6bed;
+    cursor: pointer;
+}
+
+.checkbox-row span {
+    display: grid;
+    gap: 2px;
+}
+
+.checkbox-row strong {
+    color: #2f3346;
+    font-size: 13px;
+    font-weight: 720;
+}
+
+.checkbox-row em,
+.webhook-field em {
+    color: #6b7089;
+    font-size: 12px;
+    font-style: normal;
+    line-height: 1.5;
+}
+
+.webhook-field {
+    display: grid;
+    gap: 6px;
+}
+
+.webhook-field > input {
+    width: 100%;
+}
+
+.package-options-note {
+    margin: 2px 0 0;
+    color: #6b7089;
+    font-size: 12px;
+}
